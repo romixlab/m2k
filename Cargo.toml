@@ -1,9 +1,12 @@
 [workspace]
 members = ["crates/iiod_client"]
 
+[workspace.package]
+version = "0.3.0"
+
 [package]
 name = "m2k_cli"
-version = "0.3.0"
+version.workspace = true
 edition = "2024"
 description = "CLI and agent skill for the Analog Devices ADALM2000 (M2K) over a pure-Rust iiod client"
 authors = ["Roman Isaikin <roman@vhrd.tech>"]

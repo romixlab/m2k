@@ -6,6 +6,11 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- Builds again after the 0.3.0 release: both crates take their version from `[workspace.package]`
+  (`version.workspace = true`), so a release bumps them together.
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
