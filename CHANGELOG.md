@@ -6,6 +6,8 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-09
+
 ### Added
 
 - `iiod_client` crate: a pure-Rust client for the iiod text protocol over TCP (attributes, buffers, context XML,
