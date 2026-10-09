@@ -6,6 +6,8 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
 ### Added
 
 - `m2k digital out FILE.csv -r RATE`: a digital pattern generator from a CSV sample buffer (the format

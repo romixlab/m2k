@@ -3,7 +3,7 @@ members = ["crates/iiod_client"]
 
 [package]
 name = "m2k_cli"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "CLI and agent skill for the Analog Devices ADALM2000 (M2K) over a pure-Rust iiod client"
 authors = ["Roman Isaikin <roman@vhrd.tech>"]
@@ -23,7 +23,7 @@ anyhow = "1"
 clap = { version = "4.6", features = ["derive", "env"] }
 clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
 ctrlc = { version = "3.5", features = ["termination"] }
-iiod_client = { path = "crates/iiod_client", version = "0.2.1" }
+iiod_client = { path = "crates/iiod_client", version = "0.3.0" }
 indicatif = "0.18"
 serde_json = "1"
 
