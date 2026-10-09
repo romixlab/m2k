@@ -2,16 +2,16 @@
 
 use crate::calib::{self, Corrections};
 use crate::conv::{self, Rail, Range};
-use crate::m2k::{self, M2k};
+use crate::m2k::{self, LogicTrigger, M2k, TriggerCondition};
 use crate::{complete, parse, stats};
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::ArgValueCandidates;
 use iiod_client::Attr;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -76,8 +76,13 @@ enum Cmd {
     Scope(ScopeArgs),
     /// Signal generator outputs W1/W2: constant or periodic signal; runs until Ctrl+C or --for.
     Gen(GenArgs),
-    /// Capture the 16 digital pins DIO0-15: state, edges and frequency per pin, optionally CSV.
+    /// Capture the 16 digital pins DIO0-15: state, edges and frequency per pin, optionally CSV/VCD.
     Logic(LogicArgs),
+    /// Digital pin outputs: pattern generator from a sample buffer.
+    Digital {
+        #[command(subcommand)]
+        cmd: DigitalCmd,
+    },
     /// Calibration of scope inputs and signal outputs (kept by the M2K until power-off).
     Cal {
         #[command(subcommand)]
@@ -244,9 +249,72 @@ struct LogicArgs {
     /// Pins to report: 0-15, 0-3,7.
     #[arg(short = 'p', long, default_value = "0-15", value_parser = |s: &str| parse::list(s, 15).map(Pins))]
     pins: Pins,
+    /// Trigger condition per pin: `PIN:COND` (e.g. `7:rising`), repeatable; COND is none, any, rising,
+    /// falling, low or high. Without one the capture is free-running (starts right away).
+    #[arg(long = "trigger", value_parser = parse_trigger)]
+    trigger: Vec<(u32, TriggerCondition)>,
+    /// Several --trigger pins must all match (AND) instead of any one of them (OR, the default).
+    #[arg(long, requires = "trigger")]
+    trigger_and: bool,
+    /// Samples kept from before the trigger (negative) or a delay in samples after it before the capture
+    /// starts (positive).
+    #[arg(
+        long,
+        default_value = "0",
+        allow_hyphen_values = true,
+        requires = "trigger"
+    )]
+    trigger_delay: i32,
+    /// Extra time to wait for the trigger condition, on top of the capture length.
+    #[arg(long, default_value = "30s", value_parser = parse::duration)]
+    trigger_wait: Duration,
     /// Write all samples as CSV: time_s and one column per reported pin.
     #[arg(long)]
     csv: Option<PathBuf>,
+    /// Write all samples as a VCD (Value Change Dump): one wire per reported pin, for sigrok and other
+    /// waveform viewers.
+    #[arg(long)]
+    vcd: Option<PathBuf>,
+}
+
+fn parse_trigger(text: &str) -> Result<(u32, TriggerCondition)> {
+    let (pin, cond) = text
+        .split_once(':')
+        .ok_or_else(|| anyhow!("`{text}`: expected PIN:CONDITION (e.g. 7:rising)"))?;
+    let pin: u32 = pin
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("`{pin}` in `{text}` is not a pin number"))?;
+    if pin > 15 {
+        bail!("{pin} in `{text}` is above 15");
+    }
+    Ok((pin, TriggerCondition::parse(cond.trim())?))
+}
+
+#[derive(Subcommand, Debug)]
+enum DigitalCmd {
+    /// Play a pattern on digital pins: push-pull or open-drain, cyclic or one-shot.
+    Out(DigitalOutArgs),
+}
+
+#[derive(Args, Debug)]
+struct DigitalOutArgs {
+    /// CSV file with a `dioN` column per pin to drive (the format `m2k logic --csv` writes); other
+    /// columns (e.g. time_s) are ignored.
+    csv: PathBuf,
+    /// Sample rate (up to 100M); the pins' divider rounds it, a warning says what was really used.
+    #[arg(short = 'r', long, value_parser = parse::si)]
+    rate: f64,
+    /// Pins driven open-drain (tristated for `1`, like I2C/1-Wire need); the rest are push-pull. Must be
+    /// a subset of the CSV's pins: 0-3,7.
+    #[arg(long, value_parser = |s: &str| parse::list(s, 15).map(Pins))]
+    open_drain: Option<Pins>,
+    /// Repeat the buffer until Ctrl+C or --for, instead of playing it once.
+    #[arg(long)]
+    cyclic: bool,
+    /// Stop after this long (only with --cyclic; a one-shot buffer stops on its own).
+    #[arg(long = "for", value_parser = parse::duration, requires = "cyclic")]
+    duration: Option<Duration>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -386,6 +454,7 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Scope(args) => scope(&out, &mut m2k_connect(connect)?, args),
         Cmd::Gen(args) => gen_cmd(&out, &mut m2k_connect(connect)?, args),
         Cmd::Logic(args) => logic(&out, &mut m2k_connect(connect)?, args),
+        Cmd::Digital { cmd } => digital(&out, &mut m2k_connect(connect)?, cmd),
         Cmd::Cal { cmd } => cal(
             &out,
             &mut m2k_connect(connect)?,
@@ -1066,10 +1135,16 @@ fn gen_cmd(out: &Out, m: &mut M2k, args: GenArgs) -> Result<()> {
 
 fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
     let pins = args.pins.0;
+    let trigger = LogicTrigger {
+        pins: args.trigger,
+        and: args.trigger_and,
+        delay: args.trigger_delay,
+        wait: args.trigger_wait,
+    };
     let secs = args.samples as f64 / args.rate;
     let bar = (secs > 1.0 || args.samples > 1_000_000)
         .then(|| out.progress((args.samples.next_multiple_of(4) * 2) as u64, "capture"));
-    let (words, rate) = m.logic_capture(args.samples, args.rate, |n| {
+    let (words, rate) = m.logic_capture(args.samples, args.rate, &trigger, |n| {
         if let Some(b) = &bar {
             b.set_position(n as u64);
         }
@@ -1129,7 +1204,35 @@ fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
     if !low.is_empty() {
         text += &format!("low: DIO {}\n", low.join(", "));
     }
-    let mut value = json!({ "samples": args.samples, "rate": rate, "pins": values });
+    let sample_index = if trigger.pins.is_empty() {
+        None
+    } else {
+        Some(-trigger.delay)
+    };
+    if let Some(i) = sample_index {
+        let joiner = if trigger.and { " and " } else { " or " };
+        text += &format!(
+            "trigger: {} (delay {} samples, sample {i} in the capture)\n",
+            trigger
+                .pins
+                .iter()
+                .map(|(p, c)| format!("DIO{p} {}", c.as_str()))
+                .collect::<Vec<_>>()
+                .join(joiner),
+            trigger.delay
+        );
+    }
+    let mut value = json!({
+        "samples": args.samples,
+        "rate": rate,
+        "pins": values,
+        "trigger": {
+            "pins": trigger.pins.iter().map(|(p, c)| json!({ "pin": p, "condition": c.as_str() })).collect::<Vec<_>>(),
+            "logic": if trigger.and { "and" } else { "or" },
+            "delay": trigger.delay,
+            "sample_index": sample_index,
+        },
+    });
     if let Some(path) = args.csv {
         let mut rows = String::from("time_s");
         for p in &pins {
@@ -1144,10 +1247,207 @@ fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
             rows.push('\n');
         }
         write_file(&path, rows.as_bytes())?;
-        text += &format!("csv: {} ({} rows)", path.display(), words.len());
+        text += &format!("csv: {} ({} rows)\n", path.display(), words.len());
         value["csv"] = json!(path.display().to_string());
     }
+    if let Some(path) = args.vcd {
+        write_vcd(&path, &pins, &words, rate)?;
+        text += &format!("vcd: {} ({} pins)", path.display(), pins.len());
+        value["vcd"] = json!(path.display().to_string());
+    }
     out.print(text, value);
+    Ok(())
+}
+
+/// A Value Change Dump sigrok and other waveform viewers can import: one wire per pin, picosecond
+/// timescale (exact for the native rates; rounded to the nearest ps otherwise), only the samples where a
+/// reported pin changed.
+fn write_vcd(path: &Path, pins: &[u32], words: &[u16], rate: f64) -> Result<()> {
+    let ps_per_sample = (1e12 / rate).round().max(1.0) as u64;
+    let symbols: Vec<char> = (b'!'..=b'~')
+        .map(|b| b as char)
+        .filter(|c| *c != '$' && !c.is_ascii_digit())
+        .take(pins.len())
+        .collect();
+    let mut s = String::new();
+    s += "$timescale 1 ps $end\n$scope module m2k $end\n";
+    for (sym, p) in symbols.iter().zip(pins) {
+        s += &format!("$var wire 1 {sym} dio{p} $end\n");
+    }
+    s += "$upscope $end\n$enddefinitions $end\n";
+    let mut last: Option<u16> = None;
+    for (k, w) in words.iter().enumerate() {
+        if last == Some(*w) {
+            continue;
+        }
+        s += &format!("#{}\n", k as u64 * ps_per_sample);
+        if k == 0 {
+            s += "$dumpvars\n";
+        }
+        for (sym, p) in symbols.iter().zip(pins) {
+            let bit = (w >> p) & 1;
+            if last.is_none_or(|l| (l >> p) & 1 != bit) {
+                s += &format!("{bit}{sym}\n");
+            }
+        }
+        if k == 0 {
+            s += "$end\n";
+        }
+        last = Some(*w);
+    }
+    write_file(path, s.as_bytes())
+}
+
+// ---- digital ----
+
+fn digital(out: &Out, m: &mut M2k, cmd: DigitalCmd) -> Result<()> {
+    match cmd {
+        DigitalCmd::Out(args) => digital_out(out, m, args),
+    }
+}
+
+/// A CSV with a `dioN` column per driven pin (the format `m2k logic --csv` writes): pins in column
+/// order, and one `u16` word per row (bit N = DIO N of the row's pins; other bits 0).
+fn read_digital_csv(path: &Path) -> Result<(Vec<u32>, Vec<u16>)> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut lines = text.lines();
+    let header = lines
+        .next()
+        .ok_or_else(|| anyhow!("{}: empty file", path.display()))?;
+    let columns: Vec<(usize, u32)> = header
+        .split(',')
+        .enumerate()
+        .filter_map(|(i, c)| {
+            c.trim()
+                .strip_prefix("dio")
+                .and_then(|n| n.parse().ok())
+                .map(|p| (i, p))
+        })
+        .collect();
+    if columns.is_empty() {
+        bail!(
+            "{}: no `dioN` column in the header (`{header}`)",
+            path.display()
+        );
+    }
+    let mut words = vec![];
+    for (n, line) in lines.enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split(',').collect();
+        let mut w: u16 = 0;
+        for &(i, pin) in &columns {
+            let v = fields
+                .get(i)
+                .ok_or_else(|| anyhow!("{}:{}: missing column {i}", path.display(), n + 2))?
+                .trim();
+            match v {
+                "1" => w |= 1 << pin,
+                "0" => {}
+                _ => bail!("{}:{}: `{v}` is not 0 or 1", path.display(), n + 2),
+            }
+        }
+        words.push(w);
+    }
+    let pins = columns.into_iter().map(|(_, p)| p).collect();
+    Ok((pins, words))
+}
+
+fn digital_out(out: &Out, m: &mut M2k, args: DigitalOutArgs) -> Result<()> {
+    let (pins, words) = read_digital_csv(&args.csv)?;
+    let open_drain = args.open_drain.map(|p| p.0).unwrap_or_default();
+    for p in &open_drain {
+        if !pins.contains(p) {
+            bail!(
+                "--open-drain {p}: not one of the CSV's pins ({})",
+                pins.iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
+            .context("install the Ctrl+C handler")?;
+    }
+    let started = m.digital_start(&pins, &open_drain, args.rate, &words, args.cyclic);
+    let actual = match started {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = m.digital_stop(&pins);
+            return Err(e);
+        }
+    };
+    if (actual - args.rate).abs() > args.rate * 1e-6 {
+        out.warn(&format!(
+            "{} is not available, driving at {}",
+            parse::fmt_unit(args.rate, "S/s"),
+            parse::fmt_unit(actual, "S/s")
+        ));
+    }
+    let names: Vec<String> = pins.iter().map(|p| format!("DIO{p}")).collect();
+    let mode = if open_drain.is_empty() {
+        "push-pull".to_string()
+    } else {
+        format!(
+            "open-drain: DIO {}",
+            open_drain
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let until = if args.cyclic {
+        match args.duration {
+            Some(d) => format!("for {}", parse::fmt_secs(d.as_secs_f64())),
+            None => "until Ctrl+C".to_string(),
+        }
+    } else {
+        format!("once ({})", parse::fmt_secs(words.len() as f64 / actual))
+    };
+    out.print(
+        format!(
+            "{}: {} samples at {} ({}); running {until}",
+            names.join(", "),
+            words.len(),
+            parse::fmt_unit(actual, "S/s"),
+            mode
+        ),
+        json!({
+            "pins": pins,
+            "open_drain": open_drain,
+            "rate": actual,
+            "cyclic": args.cyclic,
+            "running": true,
+            "samples": words.len(),
+            "csv": args.csv.display().to_string(),
+        }),
+    );
+    let _ = std::io::stdout().flush();
+    let start = Instant::now();
+    if args.cyclic {
+        while !stop.load(Ordering::SeqCst) && args.duration.is_none_or(|d| start.elapsed() < d) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    } else {
+        let secs = words.len() as f64 / actual;
+        while !stop.load(Ordering::SeqCst) && start.elapsed().as_secs_f64() < secs {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    m.digital_stop(&pins)?;
+    if !out.json {
+        eprintln!(
+            "{}: off after {}",
+            names.join(", "),
+            parse::fmt_secs(start.elapsed().as_secs_f64())
+        );
+    }
     Ok(())
 }
 
@@ -1296,5 +1596,106 @@ mod tests {
                 .unwrap();
         let Cmd::Scope(s) = cli.cmd else { panic!() };
         assert_eq!((s.samples, s.rate), (100_000, 10e6));
+
+        let cli = Cli::try_parse_from([
+            "m2k",
+            "logic",
+            "--trigger",
+            "3:rising",
+            "--trigger",
+            "7:low",
+            "--trigger-and",
+            "--trigger-delay",
+            "-100",
+            "--vcd",
+            "/tmp/x.vcd",
+        ])
+        .unwrap();
+        let Cmd::Logic(l) = cli.cmd else { panic!() };
+        assert_eq!(
+            l.trigger,
+            [
+                (3, TriggerCondition::EdgeRising),
+                (7, TriggerCondition::LevelLow)
+            ]
+        );
+        assert!(l.trigger_and);
+        assert_eq!(l.trigger_delay, -100);
+        assert!(Cli::try_parse_from(["m2k", "logic", "--trigger-and"]).is_err());
+
+        let cli = Cli::try_parse_from([
+            "m2k",
+            "digital",
+            "out",
+            "pattern.csv",
+            "-r",
+            "1M",
+            "--open-drain",
+            "0,1",
+            "--cyclic",
+            "--for",
+            "5s",
+        ])
+        .unwrap();
+        let Cmd::Digital {
+            cmd: DigitalCmd::Out(d),
+        } = cli.cmd
+        else {
+            panic!()
+        };
+        assert_eq!(d.rate, 1e6);
+        assert_eq!(d.open_drain.unwrap().0, [0, 1]);
+        assert!(d.cyclic);
+        assert!(
+            Cli::try_parse_from([
+                "m2k",
+                "digital",
+                "out",
+                "pattern.csv",
+                "-r",
+                "1M",
+                "--for",
+                "5s"
+            ])
+            .is_err()
+        );
+    }
+
+    fn write_temp(name: &str, content: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("m2k_cli_test_{}_{name}", std::process::id()));
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn digital_csv_roundtrip() {
+        let path = write_temp(
+            "pattern.csv",
+            "time_s,dio0,dio3\n0.0,0,0\n0.1,1,0\n0.2,1,1\n",
+        );
+        let (pins, words) = read_digital_csv(&path).unwrap();
+        assert_eq!(pins, [0, 3]);
+        assert_eq!(words, [0b0000, 0b0001, 0b1001]);
+        std::fs::remove_file(&path).unwrap();
+
+        let bad = write_temp("bad.csv", "a,b\n1,2\n");
+        assert!(read_digital_csv(&bad).is_err());
+        std::fs::remove_file(&bad).unwrap();
+    }
+
+    #[test]
+    fn vcd_format() {
+        let path = std::env::temp_dir().join(format!("m2k_cli_test_{}.vcd", std::process::id()));
+        write_vcd(&path, &[0, 1], &[0b00, 0b01, 0b01, 0b11], 1e6).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(text.contains("$timescale 1 ps $end"));
+        assert!(text.contains("$var wire 1 ! dio0 $end"));
+        assert!(text.contains("$var wire 1 \" dio1 $end"));
+        assert!(text.contains("#0\n$dumpvars\n0!\n0\"\n$end\n"));
+        // sample 1 (t=1e6 ps) changes dio0 to 1; sample 2 repeats, so no entry; sample 3 changes dio1 too
+        assert!(text.contains("#1000000\n1!\n"));
+        assert!(!text.contains("#2000000"));
+        assert!(text.contains("#3000000\n1\"\n"));
     }
 }

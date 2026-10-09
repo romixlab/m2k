@@ -164,6 +164,130 @@ fn generator_into_scope() {
 }
 
 #[test]
+fn digital_out_and_logic_trigger() {
+    let Some(emu) = emu() else { return };
+    let dir = std::env::temp_dir().join(format!("m2k_emu_digital_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // direction/outputmode attributes round-trip, and the pins go back to `in` after a one-shot buffer
+    let csv = dir.join("pattern.csv");
+    std::fs::write(
+        &csv,
+        "time_s,dio0,dio1\n0.0,0,0\n0.1,1,0\n0.2,1,1\n0.3,0,1\n",
+    )
+    .unwrap();
+    let v = json(
+        &emu.uri,
+        &[
+            "digital",
+            "out",
+            csv.to_str().unwrap(),
+            "-r",
+            "1k",
+            "--open-drain",
+            "0",
+        ],
+    );
+    assert_eq!(v["pins"], serde_json::json!([0, 1]));
+    assert_eq!(v["open_drain"], serde_json::json!([0]));
+    assert_eq!(v["samples"], 4);
+    let v = json(&emu.uri, &["attr", "m2k-logic-analyzer", "-c", "voltage0"]);
+    assert_eq!(v["attrs"]["direction"], "in", "{v}");
+    assert_eq!(v["attrs"]["outputmode"], "open-drain", "{v}");
+    let v = json(&emu.uri, &["attr", "m2k-logic-analyzer", "-c", "voltage1"]);
+    assert_eq!(v["attrs"]["direction"], "in", "{v}");
+    assert_eq!(v["attrs"]["outputmode"], "push-pull", "{v}");
+
+    // a bad CSV and a pin outside the CSV's own are rejected before anything is touched
+    let bad = dir.join("bad.csv");
+    std::fs::write(&bad, "a,b\n1,2\n").unwrap();
+    assert!(
+        !m2k(
+            &emu.uri,
+            &["digital", "out", bad.to_str().unwrap(), "-r", "1k"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        !m2k(
+            &emu.uri,
+            &[
+                "digital",
+                "out",
+                csv.to_str().unwrap(),
+                "-r",
+                "1k",
+                "--open-drain",
+                "5"
+            ],
+        )
+        .status
+        .success()
+    );
+
+    // a trigger on the emulator (which models no digital inputs or triggers) still round-trips the
+    // attributes and returns right away; the shape has a stable `trigger` object either way
+    let v = json(
+        &emu.uri,
+        &[
+            "logic",
+            "-n",
+            "1k",
+            "-r",
+            "1M",
+            "--trigger",
+            "3:rising",
+            "--trigger-delay",
+            "-10",
+        ],
+    );
+    assert_eq!(
+        v["trigger"],
+        serde_json::json!({
+            "pins": [{"pin": 3, "condition": "edge-rising"}],
+            "logic": "or",
+            "delay": -10,
+            "sample_index": 10,
+        })
+    );
+    let v = json(&emu.uri, &["logic", "-n", "1k", "-p", "0"]);
+    assert_eq!(
+        v["trigger"],
+        serde_json::json!({ "pins": [], "logic": "or", "delay": 0, "sample_index": null })
+    );
+
+    // CSV/VCD export
+    let csv_out = dir.join("cap.csv");
+    let vcd_out = dir.join("cap.vcd");
+    let v = json(
+        &emu.uri,
+        &[
+            "logic",
+            "-n",
+            "1000",
+            "-p",
+            "0-3",
+            "--csv",
+            csv_out.to_str().unwrap(),
+            "--vcd",
+            vcd_out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(v["samples"], 1000);
+    assert_eq!(
+        std::fs::read_to_string(&csv_out).unwrap().lines().count(),
+        1001
+    );
+    let vcd = std::fs::read_to_string(&vcd_out).unwrap();
+    assert!(vcd.starts_with("$timescale 1 ps $end\n"));
+    assert!(vcd.contains("$var wire 1 ! dio0 $end"));
+    assert!(vcd.contains("$dumpvars\n"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn logic_and_calibration() {
     let Some(emu) = emu() else { return };
     let v = json(&emu.uri, &["logic", "-n", "5k", "-p", "0-3"]);

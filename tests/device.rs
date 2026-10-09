@@ -1,11 +1,12 @@
 //! Against a real ADALM2000, only when `M2K_TEST_URI` is set (e.g. `ip:192.168.2.1`); skipped otherwise.
 //!
-//! Without more it only reads (info, monitors, scope, logic). With `M2K_TEST_LOOPBACK=1` it also drives the
-//! outputs and calibrates, and needs W1 wired to 1+, W2 to 2+, and 1-, 2- to GND. It switches every output
-//! and supply off again.
+//! Without more it only reads (info, monitors, scope, logic) and drives DIO0 (`digital_self_loopback`,
+//! which needs nothing wired: `digital out` and `logic` read the same physical pin). With
+//! `M2K_TEST_LOOPBACK=1` it also drives the analog outputs and calibrates, and needs W1 wired to 1+, W2 to
+//! 2+, and 1-, 2- to GND. It switches every output and supply off again.
 
 mod common;
-use common::{f, gen_bg, json, wait};
+use common::{digital_bg, f, gen_bg, json, wait};
 use std::time::Duration;
 
 fn uri() -> Option<String> {
@@ -78,4 +79,83 @@ fn loopback_and_supplies() {
     json(&uri, &["psu", "off"]);
     assert!((f(&v["pos"]["measured"]) - 1.0).abs() < 0.05, "{v}");
     assert!((f(&v["neg"]["measured"]) + 1.0).abs() < 0.05, "{v}");
+}
+
+/// Digital out and logic trigger (LOGIC-2, LOGIC-3), self-contained: `digital out` drives DIO0 and
+/// `logic` reads the same physical pin back, no external wiring needed (DIO0 is otherwise free on this
+/// bench). Independent of `M2K_TEST_LOOPBACK` (that one is about the analog W1/W2 wiring).
+#[test]
+fn digital_self_loopback() {
+    let Some(uri) = uri() else { return };
+    let dir = std::env::temp_dir().join(format!("m2k_device_digital_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("pattern.csv");
+    // cyclic 0,1,0,1 at 10 kS/s: DIO0 toggles every sample, a 5 kHz square wave
+    std::fs::write(&csv, "time_s,dio0\n0,0\n0.1,1\n0.2,0\n0.3,1\n").unwrap();
+
+    let g = digital_bg(
+        &uri,
+        &[
+            csv.to_str().unwrap(),
+            "-r",
+            "10k",
+            "--cyclic",
+            "--for",
+            "1s",
+        ],
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let v = json(&uri, &["logic", "-n", "20k", "-r", "100k", "-p", "0"]);
+    let pin = &v["pins"][0];
+    assert_eq!(
+        pin["direction"], "out",
+        "DIO0 should read as an output while `digital out` drives it: {v}"
+    );
+    assert!(
+        pin["edges"].as_u64().unwrap_or(0) > 100,
+        "expected DIO0 to toggle: `digital out` and `logic` read the same physical pin: {v}"
+    );
+    assert!((f(&pin["frequency"]) - 5000.0).abs() < 100.0, "{v}");
+    wait(g);
+
+    let v = json(
+        &uri,
+        &["attr", "m2k-logic-analyzer", "-c", "voltage0", "direction"],
+    );
+    assert_eq!(
+        v["value"], "in",
+        "`digital out` should tri-state DIO0 again once it stops: {v}"
+    );
+
+    // with DIO0 still toggling, a rising-edge trigger should fire almost immediately
+    let g = digital_bg(
+        &uri,
+        &[
+            csv.to_str().unwrap(),
+            "-r",
+            "10k",
+            "--cyclic",
+            "--for",
+            "2s",
+        ],
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let v = json(
+        &uri,
+        &[
+            "logic",
+            "-n",
+            "1000",
+            "-r",
+            "100k",
+            "--trigger",
+            "0:rising",
+            "--trigger-wait",
+            "3s",
+        ],
+    );
+    wait(g);
+    assert_eq!(v["trigger"]["sample_index"], 0, "{v}");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

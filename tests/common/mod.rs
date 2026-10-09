@@ -44,8 +44,22 @@ pub fn gen_bg(uri: &str, args: &[&str]) -> std::process::Child {
         .expect("start m2k gen")
 }
 
-/// Waits for a `--for` generator to finish and checks it ended cleanly.
+/// Waits for a `--for` generator or digital output to finish and checks it ended cleanly.
 pub fn wait(mut child: std::process::Child) {
-    let status = child.wait().expect("wait for m2k gen");
-    assert!(status.success(), "m2k gen failed: {status}");
+    let status = child.wait().expect("wait for m2k gen/digital out");
+    assert!(status.success(), "m2k gen/digital out failed: {status}");
+}
+
+/// Starts `m2k digital out ARGS` in the background (it runs until killed, the buffer ends, or `--for`).
+/// Only `tests/device.rs` uses this today; `common` is compiled once per test binary.
+#[allow(dead_code)]
+pub fn digital_bg(uri: &str, args: &[&str]) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_m2k"))
+        .args(["--uri", uri, "digital", "out"])
+        .args(args)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start m2k digital out")
 }

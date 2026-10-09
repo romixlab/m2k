@@ -6,6 +6,16 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+### Added
+
+- `m2k digital out FILE.csv -r RATE`: a digital pattern generator from a CSV sample buffer (the format
+  `logic --csv` writes), per-pin push-pull or open-drain (`--open-drain`), cyclic or one-shot (`--cyclic`,
+  `--for`) (LOGIC-2).
+- `m2k logic --trigger PIN:COND` (repeatable): edge/level trigger per pin, `--trigger-and`,
+  `--trigger-delay` (pretrigger/delay in samples), `--trigger-wait` (LOGIC-3).
+- `m2k logic --vcd FILE.vcd`: a Value Change Dump of the capture alongside `--csv`, for sigrok and other
+  waveform viewers (LOGIC-5).
+
 ## [0.2.1] - 2026-10-09
 
 ### Fixed

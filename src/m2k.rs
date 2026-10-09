@@ -3,7 +3,7 @@
 
 use crate::conv::{self, AdcScale, Rail, RailCal, Range};
 use anyhow::{Context as _, Result, anyhow, bail};
-use iiod_client::{Attr, Client, Context, Device};
+use iiod_client::{Attr, Channel, Client, Context, Device};
 use std::time::Duration;
 
 pub const DEFAULT_URI: &str = "ip:192.168.2.1";
@@ -23,6 +23,7 @@ pub const XADC: &str = "xadc";
 pub const DACS: [&str; 2] = ["m2k-dac-a", "m2k-dac-b"];
 pub const LOGIC: &str = "m2k-logic-analyzer";
 pub const LOGIC_RX: &str = "m2k-logic-analyzer-rx";
+pub const LOGIC_TX: &str = "m2k-logic-analyzer-tx";
 
 /// Samples in one capture: buffers hold a multiple of 4 samples, and the device has 512 MB for everything.
 pub const BUFFER_STEP: usize = 4;
@@ -566,6 +567,7 @@ impl M2k {
         &mut self,
         samples: usize,
         sample_rate: f64,
+        trigger: &LogicTrigger,
         progress: impl FnMut(usize),
     ) -> Result<(Vec<u16>, f64)> {
         if samples == 0 || samples > MAX_SAMPLES {
@@ -577,7 +579,23 @@ impl M2k {
             .iter()
             .filter(|c| c.attrs.iter().any(|a| a == "trigger"))
         {
-            self.set(LOGIC_RX, chn_attr((&c.id, false), "trigger"), "none")?;
+            let pin: Option<u32> = c.id.strip_prefix("voltage").and_then(|n| n.parse().ok());
+            let cond = pin
+                .and_then(|p| trigger.pins.iter().find(|(tp, _)| *tp == p))
+                .map_or(TriggerCondition::None, |(_, c)| *c);
+            self.set(LOGIC_RX, chn_attr((&c.id, false), "trigger"), cond.as_str())?;
+        }
+        if dev.channels.iter().any(|c| c.id == "voltage0") {
+            self.set(
+                LOGIC_RX,
+                chn_attr(("voltage0", false), "trigger_logic_mode"),
+                if trigger.and { "and" } else { "or" },
+            )?;
+            self.set(
+                LOGIC_RX,
+                chn_attr(("voltage0", false), "trigger_delay"),
+                trigger.delay,
+            )?;
         }
         self.set(
             LOGIC_RX,
@@ -585,7 +603,12 @@ impl M2k {
             sample_rate as u64,
         )?;
         let actual = self.get_f64(LOGIC_RX, Attr::Device("sampling_frequency"))?;
-        self.allow(samples as f64 / actual.max(1.0))?;
+        let wait = if trigger.pins.is_empty() {
+            0.0
+        } else {
+            trigger.wait.as_secs_f64()
+        };
+        self.allow(samples as f64 / actual.max(1.0) + wait)?;
         let pins: Vec<_> = dev.channels.iter().filter(|c| c.scan.is_some()).collect();
         let mask = dev.mask_of(pins.iter().copied());
         let layout = dev.layout(&mask);
@@ -632,6 +655,134 @@ impl M2k {
             })
             .collect()
     }
+
+    /// Switches one of the 16 digital pins between input and output (`m2k-logic-analyzer`'s `direction`).
+    pub fn logic_set_direction(&mut self, pin: u32, out: bool) -> Result<()> {
+        self.set(
+            LOGIC,
+            chn_attr((&logic_pin(pin), false), "direction"),
+            if out { "out" } else { "in" },
+        )
+    }
+
+    /// Push-pull or open-drain drive of one pin when it is an output (`outputmode`).
+    pub fn logic_set_output_mode(&mut self, pin: u32, open_drain: bool) -> Result<()> {
+        self.set(
+            LOGIC,
+            chn_attr((&logic_pin(pin), false), "outputmode"),
+            if open_drain {
+                "open-drain"
+            } else {
+                "push-pull"
+            },
+        )
+    }
+
+    /// Starts a pattern on the digital pins: `pins` are switched to outputs (open-drain for the ones also
+    /// in `open_drain`, push-pull otherwise), loaded with one `u16` per buffer slot (bit N = DIO N; only the
+    /// bits of `pins` reach the physical lines, the rest are ignored), and started (`cyclic` repeats until
+    /// [`digital_stop`], otherwise it plays once). Pins not in `pins` are left as they are.
+    pub fn digital_start(
+        &mut self,
+        pins: &[u32],
+        open_drain: &[u32],
+        sample_rate: f64,
+        words: &[u16],
+        cyclic: bool,
+    ) -> Result<f64> {
+        if words.len() < BUFFER_STEP || !words.len().is_multiple_of(BUFFER_STEP) {
+            bail!(
+                "a digital output buffer holds a multiple of {BUFFER_STEP} samples, at least {BUFFER_STEP}, not {}",
+                words.len()
+            );
+        }
+        for &p in pins {
+            self.logic_set_output_mode(p, open_drain.contains(&p))?;
+            self.logic_set_direction(p, true)?;
+        }
+        self.set(
+            LOGIC_TX,
+            Attr::Device("sampling_frequency"),
+            sample_rate as u64,
+        )?;
+        let actual = self.get_f64(LOGIC_TX, Attr::Device("sampling_frequency"))?;
+        let dev = self.device(LOGIC_TX)?.clone();
+        let scan: Vec<&Channel> = dev.channels.iter().filter(|c| c.scan.is_some()).collect();
+        let mask = dev.mask_of(scan);
+        let mut data = Vec::with_capacity(words.len() * 2);
+        for w in words {
+            data.extend_from_slice(&w.to_le_bytes());
+        }
+        let _ = self.client.close(&dev.id);
+        self.client.open(&dev.id, words.len(), &mask, cyclic)?;
+        self.client.write_buf(&dev.id, &data)?;
+        Ok(actual)
+    }
+
+    /// Stops a running pattern and switches `pins` back to inputs (tri-state).
+    pub fn digital_stop(&mut self, pins: &[u32]) -> Result<()> {
+        let id = self.device(LOGIC_TX)?.id.clone();
+        let _ = self.client.close(&id);
+        for &p in pins {
+            self.logic_set_direction(p, false)?;
+        }
+        Ok(())
+    }
+}
+
+/// `m2k-logic-analyzer-rx`'s per-pin `trigger` attribute values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerCondition {
+    None,
+    EdgeAny,
+    EdgeRising,
+    EdgeFalling,
+    LevelLow,
+    LevelHigh,
+}
+
+impl TriggerCondition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TriggerCondition::None => "none",
+            TriggerCondition::EdgeAny => "edge-any",
+            TriggerCondition::EdgeRising => "edge-rising",
+            TriggerCondition::EdgeFalling => "edge-falling",
+            TriggerCondition::LevelLow => "level-low",
+            TriggerCondition::LevelHigh => "level-high",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<TriggerCondition> {
+        Ok(match s {
+            "none" => TriggerCondition::None,
+            "edge-any" | "any" => TriggerCondition::EdgeAny,
+            "edge-rising" | "rising" | "rise" => TriggerCondition::EdgeRising,
+            "edge-falling" | "falling" | "fall" => TriggerCondition::EdgeFalling,
+            "level-low" | "low" => TriggerCondition::LevelLow,
+            "level-high" | "high" => TriggerCondition::LevelHigh,
+            _ => bail!(
+                "`{s}`: trigger condition is none, edge-any, edge-rising, edge-falling, level-low or \
+                 level-high (any, rising, falling, low, high also work)"
+            ),
+        })
+    }
+}
+
+/// A logic analyzer trigger: a condition per pin, how several pins combine, and the sample delay
+/// (negative keeps that many samples from before the trigger, positive delays the start of the capture
+/// by that many samples after it).
+#[derive(Debug, Clone, Default)]
+pub struct LogicTrigger {
+    pub pins: Vec<(u32, TriggerCondition)>,
+    pub and: bool,
+    pub delay: i32,
+    /// Extra time to wait for the condition to fire, on top of the capture length itself.
+    pub wait: Duration,
+}
+
+fn logic_pin(pin: u32) -> String {
+    format!("voltage{pin}")
 }
 
 const I16_LE: iiod_client::DataFormat = iiod_client::DataFormat {

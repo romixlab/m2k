@@ -30,7 +30,9 @@ don't know:
 
 - **What is wired where.** Scope: 1+/1- and 2+/2- are differential inputs; for a normal measurement 1- (2-) goes
   to the circuit's ground. Generator: W1, W2 against GND. Supplies: V+ (0..5 V), V- (-5..0 V), up to ~50 mA.
-  Digital: DIO0-15, 3.3 V logic (5 V tolerant).
+  Digital: DIO0-15, 3.3 V logic (5 V tolerant); `digital out` switches a pin to an output for as long as it
+  runs and back to an input (tri-state) when it stops — check nothing else is driving that pin at the same
+  time, and use `--open-drain` for buses that need it (I2C, 1-Wire) so two drivers never fight.
 - **Allowed levels** for anything you drive, and the expected range of what you measure (±2.5 V range for small
   signals, ±25 V otherwise).
 - **For signals**: expected frequency, so you can pick the sample rate (10x the highest frequency of interest,
@@ -52,6 +54,8 @@ m2k gen -c 1 --for 30s sine -f 1k -a 0.5 -o 1     # W1: 1 kHz, 0.5 V peak around
 m2k gen -c 1,2 --for 10s const 1.2                # both outputs at 1.2 V
 m2k gen -c 2 --for 10s square -f 10k -a 1.65 -o 1.65 --duty 25   # 0..3.3 V logic-level clock
 m2k logic -n 100k -r 10M -p 0-7       # DIO0-7: state, edges, frequency per pin
+m2k logic -n 1M -r 10M --trigger 3:rising --trigger-delay -1000 --vcd /tmp/cap.vcd   # wait for DIO3 to rise, keep 1000 samples before it
+m2k digital out pattern.csv -r 1M --open-drain 0,1 --cyclic --for 5s   # play a dioN-column CSV on its pins, 0/1 open-drain
 m2k dmm                               # board monitors: supply rails, temperatures
 m2k attr m2k-adc                      # any IIO attribute (read; add a value to write)
 ```
@@ -69,6 +73,10 @@ Sample rates: native 1k, 10k, 100k, 1M, 10M, 100M S/s; others are made by averag
 got). A capture holds up to 8M samples per channel. Sine frequencies are exact when the output rate divides
 into whole periods; the `gen` line prints the real frequency.
 
+`logic` and `digital out` share one clock divided from 100 MS/s across all 16 pins: asking for fewer pins
+(`-p`, or fewer `dioN` columns) does not raise the limit (unlike an 8-channel Saleae, which gets faster with
+fewer channels). The divider rounds to the nearest rate it can hit; a warning says the real one used.
+
 ## 3. Read the output
 
 ```
@@ -84,7 +92,9 @@ ch2: mean +0.1603 V, vpp 0.0320 V, min +0.1438 V, max +0.1758 V, rms 0.1603 V, a
 - `warning: chN hit the end of the ±2.5 V range`: the signal is bigger than shown, use `--range 25`.
 - `warning: ... not calibrated`: run `m2k cal run` and measure again.
 - Logic: `high: DIO ...` / `low: DIO ...` list static pins; toggling pins get their own line. Unconnected pins
-  read high. `(output)` marks pins configured as outputs.
+  read high. `(output)` marks pins configured as outputs. A triggered capture prints a `trigger: ...` line with
+  which pin(s) fired, the delay and which sample in the capture it landed on (`sample_index` in `--json`);
+  without `--trigger` the capture starts right away as before.
 - Accuracy after `cal run` (measured through a W1→1+ loopback): ±2.5 V range within ~10 mV; ±25 V range within
   ~1.5 % plus up to ~70 mV offset.
 
@@ -96,10 +106,12 @@ offer the CSV path for a closer look.
 
 ## Limits (prototype 0.1)
 
-- No triggers yet: captures start right away (SCOPE-2, LOGIC-3). To catch an event, capture longer and look in
-  the CSV.
-- No digital outputs, no arbitrary waveforms, no scope vertical offset yet.
-- A killed `m2k gen` (SIGKILL) leaves the output amplifier on at about 0 V: `m2k gen -c 1,2 off`.
+- Scope captures still have no trigger (SCOPE-2): they start right away. To catch an event, capture longer and
+  look in the CSV. Digital captures do have a trigger now (LOGIC-3, see `m2k logic --trigger`).
+- No arbitrary analog waveforms, no scope vertical offset yet.
+- A killed `m2k gen` (SIGKILL) leaves the output amplifier on at about 0 V: `m2k gen -c 1,2 off`. A killed
+  `m2k digital out` leaves its pins driving the last sample: `m2k attr m2k-logic-analyzer -c voltageN direction in`
+  per pin tri-states it again.
 - Verified on a real M2K (Rev.D, firmware 0.27): info, attr, psu (on its own monitor), dmm, voltmeter, scope
   and gen through a loopback, cal run/status/reset, logic with open pins. Not yet verified: logic with real
   signals on the pins, `cal lut` (no board at hand had a factory table), supplies against an external meter.

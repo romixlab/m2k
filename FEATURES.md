@@ -92,9 +92,28 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing on the digital pins or supplies (9 Oct 20
 - 🧪 **LOGIC-1 logic**: free-running capture of DIO0-15 (`-n`, `-r`, `-p`), per pin low/high/toggling, edges,
   frequency, share high, shortest pulse, pin direction; `--csv`. Runs on the real M2K (open pins read high) and
   the emulator (pins read low); not yet checked with a real signal on a pin.
-- 📋 **LOGIC-2 Digital outputs**: set pins, play patterns (`m2k-logic-analyzer-tx`, `direction`).
-- 📋 **LOGIC-3 Trigger**: edge/level per pin (`trigger` attributes of `m2k-logic-analyzer-rx`).
+- 🧪 **LOGIC-2 Digital outputs**: `m2k digital out FILE.csv -r RATE`: a pattern from a CSV sample buffer
+  (`dioN` columns, the format `logic --csv` writes), per-pin push-pull or open-drain (`--open-drain`), cyclic or
+  one-shot (`--cyclic`/`--for`, else plays once); pins switch to `out` while running and back to `in` (tri-state)
+  on stop, Ctrl+C or error. Verified on the emulator (attribute round-trip, buffer accepted); real M2K: see
+  the self-loopback check below.
+- 🧪 **LOGIC-3 Trigger**: `logic --trigger PIN:COND` (repeatable; none/any/rising/falling/low/high),
+  `--trigger-and` (AND instead of OR across pins), `--trigger-delay` (negative = pretrigger samples kept,
+  positive = delay after the event), `--trigger-wait` (extra time to wait for it). Attribute names and the
+  divider-based `trigger_delay` sign convention are from the kernel driver
+  (`drivers/iio/logic/m2k-logic-analyzer.c`), not libm2k. The emulator does not model digital inputs or
+  triggers (AGENTS.md), so this can only be exercised attribute-round-trip there; real M2K: a `digital out`
+  pattern on a pin looped back to the same pin's `logic` capture (DIO out and in read the same physical line),
+  since no external wiring is free on the shared bench right now.
 - 💡 **LOGIC-4 Protocol decode**: UART/SPI/I2C summaries like saleae_cli's, from a capture.
+- 🧪 **LOGIC-5 VCD export**: `logic --vcd FILE.vcd` alongside `--csv`: one wire per reported pin, `dioN` names,
+  picosecond timescale, only the samples where a reported pin changed (`$dumpvars` for the initial state).
+  For sigrok and other waveform viewers to import captures (cross-check plan P2623). Not yet confirmed against
+  `sigrok-cli` (not installed on this machine yet).
+- Max sample rate: both `logic` and `digital out` share one clock divided down from 100 MS/s for however many
+  of the 16 pins are involved; asking for fewer pins (`-p`) does not raise the limit, unlike e.g. a Saleae
+  Logic 8 (saleae_cli). The rate is rounded to the nearest the divider can hit; a warning says the real rate
+  used.
 
 ## Calibration (`CAL`)
 
