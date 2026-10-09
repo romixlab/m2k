@@ -54,7 +54,7 @@ m2k gen -c 1 --for 30s sine -f 1k -a 0.5 -o 1     # W1: 1 kHz, 0.5 V peak around
 m2k gen -c 1,2 --for 10s const 1.2                # both outputs at 1.2 V
 m2k gen -c 2 --for 10s square -f 10k -a 1.65 -o 1.65 --duty 25   # 0..3.3 V logic-level clock
 m2k logic -n 100k -r 10M -p 0-7       # DIO0-7: state, edges, frequency per pin
-m2k logic -n 1M -r 10M --trigger 3:rising --trigger-delay -1000 --vcd /tmp/cap.vcd   # wait for DIO3 to rise, keep 1000 samples before it
+m2k logic -n 1M -r 10M --trigger 3:rising --trigger-delay -1000 --vcd /tmp/cap.vcd   # wait for DIO3 to rise, keep 1000 samples before it (at most 8192)
 m2k digital out pattern.csv -r 1M --open-drain 0,1 --cyclic --for 5s   # play a dioN-column CSV on its pins, 0/1 open-drain
 m2k dmm                               # board monitors: supply rails, temperatures
 m2k attr m2k-adc                      # any IIO attribute (read; add a value to write)

@@ -256,8 +256,8 @@ struct LogicArgs {
     /// Several --trigger pins must all match (AND) instead of any one of them (OR, the default).
     #[arg(long, requires = "trigger")]
     trigger_and: bool,
-    /// Samples kept from before the trigger (negative) or a delay in samples after it before the capture
-    /// starts (positive).
+    /// Samples kept from before the trigger (negative, at most 8192: the M2K's limit) or a delay in samples
+    /// after it before the capture starts (positive).
     #[arg(
         long,
         default_value = "0",

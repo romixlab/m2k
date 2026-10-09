@@ -6,6 +6,12 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- `logic --trigger-delay` below -8192 fails before touching the device with a message naming the limit (the M2K
+  keeps at most 8192 samples from before the trigger, at every rate) instead of the driver's bare
+  `invalid argument (EINVAL)` (LOGIC-3).
+
 ## [0.3.1] - 2026-10-09
 
 ### Fixed

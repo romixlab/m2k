@@ -28,6 +28,21 @@ pub const LOGIC_TX: &str = "m2k-logic-analyzer-tx";
 /// Samples in one capture: buffers hold a multiple of 4 samples, and the device has 512 MB for everything.
 pub const BUFFER_STEP: usize = 4;
 pub const MAX_SAMPLES: usize = 8_000_000;
+/// Most samples the logic analyzer keeps from before its trigger (`trigger_delay` down to -8192; the driver
+/// answers EINVAL below that, at every sample rate).
+pub const LOGIC_MAX_PRETRIGGER: i32 = 8192;
+
+/// `delay` when the logic analyzer takes it as `trigger_delay`, else what the limit is.
+pub fn check_logic_trigger_delay(delay: i32, sample_rate: f64) -> Result<i32> {
+    if delay < -LOGIC_MAX_PRETRIGGER {
+        bail!(
+            "--trigger-delay {delay}: the M2K keeps at most {LOGIC_MAX_PRETRIGGER} samples from before the trigger \
+             ({:.3} ms at {sample_rate} S/s); use -{LOGIC_MAX_PRETRIGGER} or a lower rate",
+            LOGIC_MAX_PRETRIGGER as f64 / sample_rate * 1e3
+        );
+    }
+    Ok(delay)
+}
 
 /// `ip:HOST[:PORT]` or `HOST[:PORT]` as host and port.
 pub fn parse_uri(uri: &str) -> Result<(String, u16)> {
@@ -573,6 +588,7 @@ impl M2k {
         if samples == 0 || samples > MAX_SAMPLES {
             bail!("a capture takes 1 to {MAX_SAMPLES} samples, not {samples}");
         }
+        check_logic_trigger_delay(trigger.delay, sample_rate)?;
         let dev = self.device(LOGIC_RX)?.clone();
         for c in dev
             .channels
@@ -991,5 +1007,21 @@ mod tests {
         assert_eq!(state.scale(0).unwrap().gain, 1.02);
         state.sample_rate = 123.0;
         assert!(state.scale(0).is_err());
+    }
+
+    #[test]
+    fn logic_pretrigger_limit() {
+        assert_eq!(check_logic_trigger_delay(-8192, 100e6).unwrap(), -8192);
+        assert_eq!(
+            check_logic_trigger_delay(1_000_000, 100e6).unwrap(),
+            1_000_000
+        );
+        let e = check_logic_trigger_delay(-10133, 100e6)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("-10133") && e.contains("8192 samples") && e.contains("0.082 ms"),
+            "{e}"
+        );
     }
 }

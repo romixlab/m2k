@@ -100,7 +100,9 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
   9 Oct 2026); on the emulator: attribute round-trip, buffer accept/reject.
 - ✅ **LOGIC-3 Trigger**: `logic --trigger PIN:COND` (repeatable; none/any/rising/falling/low/high),
   `--trigger-and` (AND instead of OR across pins), `--trigger-delay` (negative = pretrigger samples kept,
-  positive = delay after the event), `--trigger-wait` (extra time to wait for it). Attribute names and the
+  positive = delay after the event), `--trigger-wait` (extra time to wait for it). The pretrigger is at most
+  8192 samples at every rate (found on the real M2K, 9 Oct 2026: the driver answers EINVAL from -8193 on); more
+  is refused with that limit in the message. Attribute names and the
   divider-based `trigger_delay` sign convention are from the kernel driver
   (`drivers/iio/logic/m2k-logic-analyzer.c`), not libm2k. The emulator does not model digital inputs or
   triggers (AGENTS.md), so there it only exercises the attributes; verified on the real M2K: a `digital out`
