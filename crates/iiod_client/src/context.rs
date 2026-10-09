@@ -73,7 +73,10 @@ impl Context {
         }
         let mut ctx = Context {
             name: root.attribute("name").unwrap_or_default().to_string(),
-            description: root.attribute("description").unwrap_or_default().to_string(),
+            description: root
+                .attribute("description")
+                .unwrap_or_default()
+                .to_string(),
             ..Default::default()
         };
         for node in root.children().filter(|n| n.is_element()) {
@@ -115,9 +118,9 @@ impl Device {
 
     /// A channel by id or name and direction.
     pub fn channel(&self, id_or_name: &str, output: bool) -> Option<&Channel> {
-        self.channels
-            .iter()
-            .find(|c| c.output == output && (c.id == id_or_name || c.name.as_deref() == Some(id_or_name)))
+        self.channels.iter().find(|c| {
+            c.output == output && (c.id == id_or_name || c.name.as_deref() == Some(id_or_name))
+        })
     }
 
     /// 32-bit words in this device's channel mask, as the server expects them in `OPEN`.
@@ -156,7 +159,8 @@ impl Device {
         let mut size = 0usize;
         let mut last: Option<(u32, usize)> = None;
         for (channel, scan) in scanned {
-            let len = (scan.format.storage_bits as usize / 8).max(1) * scan.format.repeat.max(1) as usize;
+            let len =
+                (scan.format.storage_bits as usize / 8).max(1) * scan.format.repeat.max(1) as usize;
             let offset = match last {
                 Some((index, offset)) if index == scan.index => offset,
                 _ => {
@@ -205,7 +209,11 @@ impl Layout {
         }
         Some(
             data.chunks_exact(self.sample_size)
-                .map(|sample| field.format.decode(&sample[field.offset..field.offset + len]))
+                .map(|sample| {
+                    field
+                        .format
+                        .decode(&sample[field.offset..field.offset + len])
+                })
                 .collect(),
         )
     }
@@ -239,7 +247,10 @@ impl DataFormat {
             shift: num(shift)?,
             repeat: num(repeat)?,
         };
-        if format.storage_bits == 0 || format.storage_bits > 64 || format.storage_bits % 8 != 0 {
+        if format.storage_bits == 0
+            || format.storage_bits > 64
+            || !format.storage_bits.is_multiple_of(8)
+        {
             return Err(bad());
         }
         Ok(format)
@@ -287,12 +298,8 @@ impl DataFormat {
 }
 
 fn required<'a>(node: roxmltree::Node<'a, '_>, attr: &str) -> Result<&'a str, Error> {
-    node.attribute(attr).ok_or_else(|| {
-        Error::Xml(format!(
-            "<{}> without `{attr}`",
-            node.tag_name().name()
-        ))
-    })
+    node.attribute(attr)
+        .ok_or_else(|| Error::Xml(format!("<{}> without `{attr}`", node.tag_name().name())))
 }
 
 fn parse_device(node: roxmltree::Node) -> Result<Device, Error> {
@@ -402,7 +409,17 @@ mod tests {
     #[test]
     fn formats_round_trip() {
         let f = DataFormat::parse("be:s12/16X2>>4").unwrap();
-        assert_eq!((f.big_endian, f.signed, f.bits, f.storage_bits, f.shift, f.repeat), (true, true, 12, 16, 4, 2));
+        assert_eq!(
+            (
+                f.big_endian,
+                f.signed,
+                f.bits,
+                f.storage_bits,
+                f.shift,
+                f.repeat
+            ),
+            (true, true, 12, 16, 4, 2)
+        );
         let mut out = vec![];
         f.encode(-5, &mut out);
         assert_eq!(out, [0xff, 0xb0]);

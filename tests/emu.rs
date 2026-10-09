@@ -1,0 +1,183 @@
+//! End to end against ADI's iio-emu in its `adalm2000` profile (github.com/analogdevicesinc/iio-emu): the
+//! binary from `IIO_EMU`, else `iio-emu` on PATH. Skipped (passes with a note) when there is none. Each test
+//! starts its own emulator on a free port.
+//!
+//! What the emulator models: the context and attributes of a Rev.C M2K with firmware 0.26, the supplies
+//! (set value = measured value), and the scope reading back what W1/W2 play. It does not model the calibration
+//! modes, the trigger, or digital inputs (they read 0). Its scope treats the 75 MS/s output samples as 100 MS/s,
+//! so frequencies read back 4/3 too high.
+
+mod common;
+use common::{f, gen_bg, json, m2k, wait};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+struct Emu {
+    child: Child,
+    uri: String,
+}
+
+impl Drop for Emu {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn emu() -> Option<Emu> {
+    let bin = std::env::var("IIO_EMU").unwrap_or_else(|_| "iio-emu".into());
+    let port = TcpListener::bind("127.0.0.1:0")
+        .ok()?
+        .local_addr()
+        .ok()?
+        .port();
+    let child = match Command::new(&bin)
+        .args(["adalm2000", "-p", &port.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("skipped: no iio-emu (set IIO_EMU or put iio-emu on PATH)");
+            return None;
+        }
+    };
+    let emu = Emu {
+        child,
+        uri: format!("ip:127.0.0.1:{port}"),
+    };
+    let start = Instant::now();
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "iio-emu did not start"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Some(emu)
+}
+
+#[test]
+fn info_attr_and_errors() {
+    let Some(emu) = emu() else { return };
+    let v = json(&emu.uri, &["info"]);
+    assert_eq!(v["m2k"], true);
+    assert_eq!(v["firmware"], "v0.26");
+    assert_eq!(v["serial"], "ADALM2000 Demo");
+    assert_eq!(v["devices"].as_array().unwrap().len(), 14);
+    assert_eq!(v["outputs"]["w1"], false);
+
+    let v = json(
+        &emu.uri,
+        &["attr", "m2k-adc", "sampling_frequency", "1000000"],
+    );
+    assert_eq!(v["value"], "1000000");
+    let v = json(
+        &emu.uri,
+        &["attr", "m2k-adc", "-c", "voltage0", "calibbias"],
+    );
+    assert_eq!(v["value"], "1050");
+    let v = json(&emu.uri, &["attr", "m2k-fabric", "-c", "voltage0", "-o"]);
+    assert!(v["attrs"]["powerdown"].is_string(), "{v}");
+
+    let out = m2k(&emu.uri, &["--json", "attr", "nosuch"]);
+    assert!(!out.status.success());
+    let err: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        err["error"]
+            .as_str()
+            .unwrap()
+            .contains("no IIO device `nosuch`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn supplies_and_monitors() {
+    let Some(emu) = emu() else { return };
+    let v = json(&emu.uri, &["psu", "set", "--pos", "3.3", "--neg", "-2"]);
+    assert_eq!(v["pos"]["enabled"], true);
+    assert!((f(&v["pos"]["measured"]) - 3.3).abs() < 0.05, "{v}");
+    assert!((f(&v["neg"]["measured"]) + 2.0).abs() < 0.05, "{v}");
+    let v = json(&emu.uri, &["psu", "off"]);
+    assert_eq!(v["pos"]["enabled"], false);
+    assert_eq!(v["neg"]["enabled"], false);
+    assert!(
+        !m2k(&emu.uri, &["psu", "set", "--pos", "5.5"])
+            .status
+            .success()
+    );
+
+    let v = json(&emu.uri, &["dmm", "temp"]);
+    let readings = v["readings"].as_array().unwrap();
+    assert_eq!(readings.len(), 2, "{v}");
+    assert!(
+        readings
+            .iter()
+            .all(|r| r["unit"] == "°C" && (0.0..100.0).contains(&f(&r["value"])))
+    );
+}
+
+#[test]
+fn generator_into_scope() {
+    let Some(emu) = emu() else { return };
+    let g = gen_bg(
+        &emu.uri,
+        &[
+            "-c", "1,2", "--for", "2s", "sine", "-f", "1k", "-a", "2", "-o", "0.5",
+        ],
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let v = json(&emu.uri, &["scope", "-n", "10k", "-r", "1M"]);
+    wait(g);
+    for ch in ["ch1", "ch2"] {
+        let s = &v[ch];
+        assert!((f(&s["vpp"]) - 4.0).abs() < 0.1, "{v}");
+        assert!((f(&s["mean"]) - 0.5).abs() < 0.1, "{v}");
+        // the emulator's resampling: 4/3 of the real frequency
+        assert!((f(&s["frequency"]) - 1333.3).abs() < 20.0, "{v}");
+    }
+    let v = json(&emu.uri, &["info"]);
+    assert_eq!(v["outputs"]["w1"], false, "generator left W1 on");
+
+    let g = gen_bg(&emu.uri, &["-c", "2", "--for", "1500ms", "const", "-1.5"]);
+    std::thread::sleep(Duration::from_millis(500));
+    let v = json(&emu.uri, &["voltmeter"]);
+    wait(g);
+    assert!((f(&v["ch2"]["dc"]) + 1.5).abs() < 0.05, "{v}");
+
+    // CSV of every sample
+    let dir = std::env::temp_dir().join(format!("m2k_emu_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("scope.csv");
+    let v = json(
+        &emu.uri,
+        &["scope", "-n", "1000", "--csv", csv.to_str().unwrap()],
+    );
+    assert_eq!(v["samples"], 1000);
+    let text = std::fs::read_to_string(&csv).unwrap();
+    assert_eq!(text.lines().count(), 1001);
+    assert!(text.starts_with("time_s,ch1_v,ch2_v\n"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn logic_and_calibration() {
+    let Some(emu) = emu() else { return };
+    let v = json(&emu.uri, &["logic", "-n", "5k", "-p", "0-3"]);
+    let pins = v["pins"].as_array().unwrap();
+    assert_eq!(pins.len(), 4);
+    assert!(pins.iter().all(|p| p["state"] == "low"), "{v}");
+
+    let v = json(&emu.uri, &["cal"]);
+    assert_eq!(v["adc_offset"], serde_json::json!([1050, 1060]));
+    // the emulator has no calibration modes: the measurement fails and nothing may change
+    let out = m2k(&emu.uri, &["--json", "cal", "run"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("implausible"));
+    assert_eq!(json(&emu.uri, &["cal"]), v);
+    let v = json(&emu.uri, &["cal", "reset"]);
+    assert_eq!(v["calibrated"], false);
+}

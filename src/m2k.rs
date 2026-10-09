@@ -33,14 +33,17 @@ pub fn parse_uri(uri: &str) -> Result<(String, u16)> {
     let rest = match uri.split_once(':') {
         Some(("ip", rest)) => rest,
         Some(("usb" | "serial" | "local", _)) => {
-            bail!("`{uri}`: only network contexts are supported (ip:HOST[:PORT]); the M2K is at ip:192.168.2.1 over its USB network")
+            bail!(
+                "`{uri}`: only network contexts are supported (ip:HOST[:PORT]); the M2K is at ip:192.168.2.1 over its USB network"
+            )
         }
         _ => uri,
     };
     let (host, port) = match rest.rsplit_once(':') {
         Some((host, port)) if !host.contains(':') => (
             host,
-            port.parse().with_context(|| format!("`{uri}`: port `{port}` is not a number"))?,
+            port.parse()
+                .with_context(|| format!("`{uri}`: port `{port}` is not a number"))?,
         ),
         _ => (rest, iiod_client::DEFAULT_PORT),
     };
@@ -91,6 +94,43 @@ impl M2k {
             self.uri,
             self.ctx.attr("hw_model").unwrap_or("unknown")
         )
+    }
+
+    /// Powers up what every measurement needs, as libm2k does when it opens an M2K: the scope front end, the
+    /// clock, and the gain registers of the AD9963 output path. Harmless to repeat; nothing is powered down at
+    /// the end, so the supplies stay as `m2k psu` set them.
+    pub fn init(&mut self) -> Result<()> {
+        let rev_a = self
+            .ctx
+            .attr("hw_model")
+            .is_some_and(|m| m.contains("Rev.A"));
+        let gain = if rev_a { 0x1b } else { 0x05 };
+        if self
+            .device(MONITOR)?
+            .debug_attrs
+            .iter()
+            .any(|a| a == "direct_reg_access")
+        {
+            // IGAIN1 (0x68, 0x6B), IGAIN2 (0x69, 0x6C), IRSET (0x6A, 0x6D) of both DAC channels
+            for (reg, value) in [
+                (0x68, gain),
+                (0x6b, gain),
+                (0x69, 0x1c),
+                (0x6c, 0x1c),
+                (0x6a, 0x20),
+                (0x6d, 0x20),
+            ] {
+                self.set(
+                    MONITOR,
+                    Attr::Debug("direct_reg_access"),
+                    format!("0x{reg:x} 0x{value:x}"),
+                )?;
+            }
+        }
+        for chn in ["voltage0", "voltage1"] {
+            self.set_bool(FABRIC, chn_attr((chn, false), "powerdown"), false)?;
+        }
+        self.set_bool(FABRIC, Attr::Device("clk_powerdown"), false)
     }
 
     pub fn device(&self, name: &str) -> Result<&Device> {
@@ -149,14 +189,23 @@ impl M2k {
     pub fn firmware(&self) -> Option<(u32, u32)> {
         let v = self.ctx.attr("fw_version")?.trim_start_matches('v');
         let (major, minor) = v.split_once('.')?;
-        let digits = |s: &str| s.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok();
+        let digits = |s: &str| {
+            s.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        };
         Some((digits(major)?, digits(minor)?))
     }
 
     /// Sample rates a device lists in `sampling_frequency_available`.
     pub fn rates(&mut self, dev: &str) -> Result<Vec<f64>> {
         let text = self.get(dev, Attr::Device("sampling_frequency_available"))?;
-        let rates: Vec<f64> = text.split_whitespace().filter_map(|r| r.parse().ok()).collect();
+        let rates: Vec<f64> = text
+            .split_whitespace()
+            .filter_map(|r| r.parse().ok())
+            .collect();
         if rates.is_empty() {
             bail!("{dev} lists no sample rates (`{text}`)");
         }
@@ -174,7 +223,9 @@ impl M2k {
     /// The scope's settings and corrections as the device holds them.
     pub fn adc_state(&mut self) -> Result<AdcState> {
         let sample_rate = self.get_f64(ADC, Attr::Device("sampling_frequency"))?;
-        let oversampling = self.get_i64(ADC, Attr::Device("oversampling_ratio"))?.max(1) as u32;
+        let oversampling = self
+            .get_i64(ADC, Attr::Device("oversampling_ratio"))?
+            .max(1) as u32;
         let mut channels = [AdcChannel::default(); 2];
         for (i, ch) in channels.iter_mut().enumerate() {
             let chn = adc_chn(i);
@@ -187,7 +238,8 @@ impl M2k {
                 None
             };
             ch.calib_gain = self.get_f64(ADC, chn_attr((chn, false), "calibscale"))?;
-            ch.offset_raw = self.get_i64(OFFSET_DAC, chn_attr((offset_dac_chn(2 + i), true), "raw"))?;
+            ch.offset_raw =
+                self.get_i64(OFFSET_DAC, chn_attr((offset_dac_chn(2 + i), true), "raw"))?;
         }
         Ok(AdcState {
             sample_rate,
@@ -198,7 +250,12 @@ impl M2k {
     }
 
     /// Free-running capture settings: no trigger, the given rate and ranges, no vertical offset.
-    pub fn adc_configure(&mut self, sample_rate: f64, oversampling: u32, ranges: [Range; 2]) -> Result<AdcState> {
+    pub fn adc_configure(
+        &mut self,
+        sample_rate: f64,
+        oversampling: u32,
+        ranges: [Range; 2],
+    ) -> Result<AdcState> {
         if self.has_attr(ADC, "calibrate") {
             // firmware 0.32 and later: corrections in the gateware
             self.set(ADC, Attr::Device("calibrate"), "true")?;
@@ -211,7 +268,11 @@ impl M2k {
         self.set(ADC, Attr::Device("sampling_frequency"), sample_rate as u64)?;
         self.set(ADC, Attr::Device("oversampling_ratio"), oversampling)?;
         for (i, range) in ranges.into_iter().enumerate() {
-            self.set(FABRIC, chn_attr((adc_chn(i), false), "gain"), range.gain_name())?;
+            self.set(
+                FABRIC,
+                chn_attr((adc_chn(i), false), "gain"),
+                range.gain_name(),
+            )?;
         }
         let state = self.adc_state()?;
         for (i, ch) in state.channels.iter().enumerate() {
@@ -224,11 +285,19 @@ impl M2k {
     }
 
     pub fn adc_set_offset_raw(&mut self, channel: usize, raw: i64) -> Result<()> {
-        self.set(OFFSET_DAC, chn_attr((offset_dac_chn(2 + channel), true), "raw"), raw)
+        self.set(
+            OFFSET_DAC,
+            chn_attr((offset_dac_chn(2 + channel), true), "raw"),
+            raw,
+        )
     }
 
     /// Captures `samples` raw samples of both scope channels with the current settings.
-    pub fn adc_capture(&mut self, samples: usize, progress: impl FnMut(usize)) -> Result<[Vec<i64>; 2]> {
+    pub fn adc_capture(
+        &mut self,
+        samples: usize,
+        progress: impl FnMut(usize),
+    ) -> Result<[Vec<i64>; 2]> {
         let mut buf = self.adc_open(samples)?;
         let data = buf.read(self, progress);
         buf.close(self);
@@ -261,14 +330,25 @@ impl M2k {
     pub fn dac_start(&mut self, channels: &[usize], sample_rate: f64, volts: &[f64]) -> Result<()> {
         let compensation = conv::dac_filter_compensation(sample_rate)
             .ok_or_else(|| anyhow!("no filter compensation for a DAC rate of {sample_rate} S/s"))?;
-        let raw: Vec<i16> = volts.iter().map(|v| conv::dac_volts_to_raw(*v, compensation)).collect();
+        let raw: Vec<i16> = volts
+            .iter()
+            .map(|v| conv::dac_volts_to_raw(*v, compensation))
+            .collect();
         self.dac_start_raw(channels, sample_rate, &raw)
     }
 
     /// The same with samples as the DAC takes them (12 bits, left aligned, inverted).
-    pub fn dac_start_raw(&mut self, channels: &[usize], sample_rate: f64, raw: &[i16]) -> Result<()> {
-        if raw.len() % BUFFER_STEP != 0 || raw.len() < 16 {
-            bail!("an output buffer holds a multiple of 4 samples, at least 16, not {}", raw.len());
+    pub fn dac_start_raw(
+        &mut self,
+        channels: &[usize],
+        sample_rate: f64,
+        raw: &[i16],
+    ) -> Result<()> {
+        if !raw.len().is_multiple_of(BUFFER_STEP) || raw.len() < 16 {
+            bail!(
+                "an output buffer holds a multiple of 4 samples, at least 16, not {}",
+                raw.len()
+            );
         }
         for ch in channels {
             let dac = dac_name(*ch)?;
@@ -298,7 +378,11 @@ impl M2k {
             self.set_bool(dac_name(*ch)?, Attr::Device("dma_sync"), false)?;
         }
         for ch in channels {
-            self.set_bool(FABRIC, chn_attr((dac_fabric_chn(*ch), true), "powerdown"), false)?;
+            self.set_bool(
+                FABRIC,
+                chn_attr((dac_fabric_chn(*ch), true), "powerdown"),
+                false,
+            )?;
         }
         Ok(())
     }
@@ -306,7 +390,11 @@ impl M2k {
     /// Switches an output off: amplifier powered down, buffer freed.
     pub fn dac_stop(&mut self, channel: usize) -> Result<()> {
         let dac = dac_name(channel)?;
-        self.set_bool(FABRIC, chn_attr((dac_fabric_chn(channel), true), "powerdown"), true)?;
+        self.set_bool(
+            FABRIC,
+            chn_attr((dac_fabric_chn(channel), true), "powerdown"),
+            true,
+        )?;
         self.set_bool(dac, Attr::Device("dma_sync"), true)?;
         let id = self.id(dac)?;
         // EBADF when this connection has no buffer open: nothing to free
@@ -321,7 +409,10 @@ impl M2k {
 
     /// Whether the output amplifier of a channel is on.
     pub fn dac_enabled(&mut self, channel: usize) -> Result<bool> {
-        Ok(!self.get_bool(FABRIC, chn_attr((dac_fabric_chn(channel), true), "powerdown"))?)
+        Ok(!self.get_bool(
+            FABRIC,
+            chn_attr((dac_fabric_chn(channel), true), "powerdown"),
+        )?)
     }
 
     // ---- user supplies ----
@@ -351,8 +442,17 @@ impl M2k {
         self.has_channel_attr(FABRIC, ("voltage3", true), "user_supply_powerdown")
     }
 
+    /// On when both the supply DAC and the rail's switch in the fabric are on. After power-up the DAC is on
+    /// (at code 2048) and only the fabric switch is off, so the DAC alone says nothing.
     pub fn psu_enabled(&mut self, rail: Rail) -> Result<bool> {
-        Ok(!self.get_bool(SUPPLY_DAC, chn_attr((rail_chn(rail), true), "powerdown"))?)
+        let dac_on = !self.get_bool(SUPPLY_DAC, chn_attr((rail_chn(rail), true), "powerdown"))?;
+        let switch = match rail {
+            Rail::Neg if self.individual_supply_enable() => "voltage3",
+            _ => "voltage2",
+        };
+        let switch_on =
+            !self.get_bool(FABRIC, chn_attr((switch, true), "user_supply_powerdown"))?;
+        Ok(dac_on && switch_on)
     }
 
     /// Sets a rail's voltage; it comes out once the rail is enabled.
@@ -363,7 +463,11 @@ impl M2k {
     }
 
     pub fn psu_enable(&mut self, rail: Rail, on: bool) -> Result<()> {
-        self.set_bool(SUPPLY_DAC, chn_attr((rail_chn(rail), true), "powerdown"), !on)?;
+        self.set_bool(
+            SUPPLY_DAC,
+            chn_attr((rail_chn(rail), true), "powerdown"),
+            !on,
+        )?;
         if self.individual_supply_enable() {
             let chn = match rail {
                 Rail::Pos => "voltage2",
@@ -376,7 +480,11 @@ impl M2k {
                 Rail::Neg => Rail::Pos,
             };
             if on || !self.psu_enabled(other)? {
-                self.set_bool(FABRIC, chn_attr(("voltage2", true), "user_supply_powerdown"), !on)?;
+                self.set_bool(
+                    FABRIC,
+                    chn_attr(("voltage2", true), "user_supply_powerdown"),
+                    !on,
+                )?;
             }
         }
         Ok(())
@@ -402,7 +510,10 @@ impl M2k {
                 continue;
             };
             for c in device.channels.iter().filter(|c| !c.output) {
-                if c.attrs.iter().any(|a| a == "raw" || a == "input" || a == "processed") {
+                if c.attrs
+                    .iter()
+                    .any(|a| a == "raw" || a == "input" || a == "processed")
+                {
                     let label = match &c.name {
                         Some(name) => format!("{dev}.{name}"),
                         None => format!("{dev}.{}", c.id),
@@ -451,35 +562,61 @@ impl M2k {
     // ---- digital pins ----
 
     /// Free-running capture of the 16 digital pins: one `u16` per sample, bit N = DIO N.
-    pub fn logic_capture(&mut self, samples: usize, sample_rate: f64, progress: impl FnMut(usize)) -> Result<(Vec<u16>, f64)> {
+    pub fn logic_capture(
+        &mut self,
+        samples: usize,
+        sample_rate: f64,
+        progress: impl FnMut(usize),
+    ) -> Result<(Vec<u16>, f64)> {
         if samples == 0 || samples > MAX_SAMPLES {
             bail!("a capture takes 1 to {MAX_SAMPLES} samples, not {samples}");
         }
         let dev = self.device(LOGIC_RX)?.clone();
-        for c in dev.channels.iter().filter(|c| c.attrs.iter().any(|a| a == "trigger")) {
+        for c in dev
+            .channels
+            .iter()
+            .filter(|c| c.attrs.iter().any(|a| a == "trigger"))
+        {
             self.set(LOGIC_RX, chn_attr((&c.id, false), "trigger"), "none")?;
         }
-        self.set(LOGIC_RX, Attr::Device("sampling_frequency"), sample_rate as u64)?;
+        self.set(
+            LOGIC_RX,
+            Attr::Device("sampling_frequency"),
+            sample_rate as u64,
+        )?;
         let actual = self.get_f64(LOGIC_RX, Attr::Device("sampling_frequency"))?;
         self.allow(samples as f64 / actual.max(1.0))?;
         let pins: Vec<_> = dev.channels.iter().filter(|c| c.scan.is_some()).collect();
         let mask = dev.mask_of(pins.iter().copied());
         let layout = dev.layout(&mask);
         if layout.sample_size != 2 {
-            bail!("{} samples are {} bytes, expected 2", dev.label(), layout.sample_size);
+            bail!(
+                "{} samples are {} bytes, expected 2",
+                dev.label(),
+                layout.sample_size
+            );
         }
         let buffered = samples.next_multiple_of(BUFFER_STEP);
         let _ = self.client.set_buffers_count(&dev.id, 1);
         self.client.open(&dev.id, buffered, &mask, false)?;
-        let read = self.client.read_buf(&dev.id, buffered * 2, mask.len(), progress);
+        let read = self
+            .client
+            .read_buf(&dev.id, buffered * 2, mask.len(), progress);
         let closed = self.client.close(&dev.id);
         let (_, data) = read?;
         closed?;
         if data.len() < samples * 2 {
-            bail!("{} sent {} of {} samples", dev.label(), data.len() / 2, samples);
+            bail!(
+                "{} sent {} of {} samples",
+                dev.label(),
+                data.len() / 2,
+                samples
+            );
         }
         let words = data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .take(samples)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
             .collect();
@@ -544,12 +681,19 @@ impl AdcBuffer {
     /// right after the previous read (or after opening).
     pub fn read(&mut self, m2k: &mut M2k, progress: impl FnMut(usize)) -> Result<[Vec<i64>; 2]> {
         let size = self.dev.layout(&self.mask).sample_size;
-        let (got, data) = m2k
-            .client
-            .read_buf(&self.dev.id, self.buffered * size, self.mask.len(), progress)?;
+        let (got, data) = m2k.client.read_buf(
+            &self.dev.id,
+            self.buffered * size,
+            self.mask.len(),
+            progress,
+        )?;
         // what the server says is in the data counts, when it makes sense (iio-emu reports junk for some devices)
         let valid: Vec<u32> = got.iter().zip(&self.mask).map(|(g, m)| g & m).collect();
-        let mask = if valid.iter().any(|w| *w != 0) { valid } else { self.mask.clone() };
+        let mask = if valid.iter().any(|w| *w != 0) {
+            valid
+        } else {
+            self.mask.clone()
+        };
         let layout = self.dev.layout(&mask);
         let mut out = [vec![], vec![]];
         for (i, ch) in out.iter_mut().enumerate() {
@@ -563,7 +707,12 @@ impl AdcBuffer {
                 .extract(index, &data)
                 .ok_or_else(|| anyhow!("{} did not capture {}", self.dev.label(), adc_chn(i)))?;
             if ch.len() < self.samples {
-                bail!("{} sent {} of {} samples", self.dev.label(), ch.len(), self.samples);
+                bail!(
+                    "{} sent {} of {} samples",
+                    self.dev.label(),
+                    ch.len(),
+                    self.samples
+                );
             }
             ch.truncate(self.samples);
         }
@@ -616,15 +765,21 @@ impl AdcState {
 
     /// Neither offset nor gain differ from the power-on values: the scope was not calibrated since power-up.
     pub fn uncalibrated(&self) -> bool {
-        self.channels
-            .iter()
-            .all(|c| c.calib_offset.unwrap_or(conv::DEFAULT_OFFSET) == conv::DEFAULT_OFFSET && c.calib_gain == 1.0)
+        self.channels.iter().all(|c| {
+            c.calib_offset.unwrap_or(conv::DEFAULT_OFFSET) == conv::DEFAULT_OFFSET
+                && c.calib_gain == 1.0
+        })
     }
 
     pub fn scale(&self, channel: usize) -> Result<AdcScale> {
         let ch = self.channels[channel.min(1)];
-        let filter_compensation = conv::adc_filter_compensation(self.sample_rate)
-            .ok_or_else(|| anyhow!("no filter compensation for an ADC rate of {} S/s", self.sample_rate))?;
+        let filter_compensation =
+            conv::adc_filter_compensation(self.sample_rate).ok_or_else(|| {
+                anyhow!(
+                    "no filter compensation for an ADC rate of {} S/s",
+                    self.sample_rate
+                )
+            })?;
         let offset_steps = ch.offset_raw - ch.calib_offset.unwrap_or(ch.offset_raw);
         Ok(AdcScale {
             range: ch.range,
@@ -641,10 +796,19 @@ mod tests {
 
     #[test]
     fn parses_uris() {
-        assert_eq!(parse_uri("ip:192.168.2.1").unwrap(), ("192.168.2.1".into(), 30431));
-        assert_eq!(parse_uri("ip:127.0.0.1:30555").unwrap(), ("127.0.0.1".into(), 30555));
+        assert_eq!(
+            parse_uri("ip:192.168.2.1").unwrap(),
+            ("192.168.2.1".into(), 30431)
+        );
+        assert_eq!(
+            parse_uri("ip:127.0.0.1:30555").unwrap(),
+            ("127.0.0.1".into(), 30555)
+        );
         assert_eq!(parse_uri("m2k.local").unwrap(), ("m2k.local".into(), 30431));
-        assert_eq!(parse_uri("localhost:1234").unwrap(), ("localhost".into(), 1234));
+        assert_eq!(
+            parse_uri("localhost:1234").unwrap(),
+            ("localhost".into(), 1234)
+        );
         assert!(parse_uri("usb:1.2.3").is_err());
         assert!(parse_uri("ip:host:port").is_err());
         assert!(parse_uri("ip:").is_err());
@@ -668,7 +832,10 @@ mod tests {
         };
         assert!(!state.uncalibrated());
         let scale = state.scale(0).unwrap();
-        assert_eq!((scale.gain, scale.filter_compensation, scale.vertical_offset), (1.0, 1.10, 0.0));
+        assert_eq!(
+            (scale.gain, scale.filter_compensation, scale.vertical_offset),
+            (1.0, 1.10, 0.0)
+        );
         state.host_gain = true;
         assert_eq!(state.scale(0).unwrap().gain, 1.02);
         state.sample_rate = 123.0;

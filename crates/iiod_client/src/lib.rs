@@ -59,10 +59,8 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Io(e) => Some(e),
-            _ => None,
-        }
+        // `Io` already prints its cause: returning it here would print it twice in error chains
+        None
     }
 }
 

@@ -95,7 +95,9 @@ impl Client {
             }
         }
         Err(last
-            .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no address to connect to"))
+            .unwrap_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no address to connect to")
+            })
             .into())
     }
 
@@ -135,13 +137,20 @@ impl Client {
         let len = self.status(&what)?;
         let value = self.payload(len)?;
         let text = String::from_utf8_lossy(&value);
-        Ok(text.trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_string())
+        Ok(text
+            .trim_matches(|c: char| c == '\0' || c.is_whitespace())
+            .to_string())
     }
 
     pub fn write_attr(&mut self, dev: &str, attr: Attr, value: &str) -> Result<(), Error> {
         let what = format!("write {dev} {attr} = {value}");
         // like libiio, the value goes with its terminating NUL
-        let mut data = format!("WRITE {dev} {} {}\r\n{value}", attr.words(), value.len() + 1).into_bytes();
+        let mut data = format!(
+            "WRITE {dev} {} {}\r\n{value}",
+            attr.words(),
+            value.len() + 1
+        )
+        .into_bytes();
         data.push(0);
         self.send(&data)?;
         self.status(&what)?;
@@ -158,7 +167,13 @@ impl Client {
     /// Opens the buffer of `dev` for `samples` samples of the channels in `mask` (least significant word first,
     /// see [`Device::mask_of`](crate::Device::mask_of)). The buffer lives until [`close`](Self::close) or the
     /// end of the connection; a cyclic output buffer repeats its data that long.
-    pub fn open(&mut self, dev: &str, samples: usize, mask: &[u32], cyclic: bool) -> Result<(), Error> {
+    pub fn open(
+        &mut self,
+        dev: &str,
+        samples: usize,
+        mask: &[u32],
+        cyclic: bool,
+    ) -> Result<(), Error> {
         let mask: String = mask.iter().rev().map(|w| format!("{w:08x}")).collect();
         self.command(&format!(
             "OPEN {dev} {samples} {mask}{}",
@@ -256,9 +271,9 @@ impl Client {
     /// A status line: a count, or a negative errno turned into an error naming `what` was tried.
     fn status(&mut self, what: &str) -> Result<usize, Error> {
         let line = self.line()?;
-        let code: i64 = line
-            .parse()
-            .map_err(|_| Error::Protocol(format!("{what}: expected a status line, got `{line}`")))?;
+        let code: i64 = line.parse().map_err(|_| {
+            Error::Protocol(format!("{what}: expected a status line, got `{line}`"))
+        })?;
         usize::try_from(code).map_err(|_| Error::Errno {
             code: code.unsigned_abs().min(i32::MAX as u64) as i32,
             what: what.to_string(),
@@ -309,7 +324,10 @@ mod tests {
             for (expect, answer) in script {
                 let mut got = vec![0u8; expect.len()];
                 sock.read_exact(&mut got).unwrap();
-                assert_eq!(String::from_utf8_lossy(&got), String::from_utf8_lossy(expect));
+                assert_eq!(
+                    String::from_utf8_lossy(&got),
+                    String::from_utf8_lossy(expect)
+                );
                 sock.write_all(answer).unwrap();
             }
         });
@@ -320,21 +338,33 @@ mod tests {
     fn reads_and_writes_attributes() {
         let mut c = serve(vec![
             (b"VERSION\r\n", b"0.25.g1234567\n"),
-            (b"READ iio:device0 sampling_frequency\r\n", b"10\n100000000\0\n"),
-            (b"READ iio:device0 INPUT voltage0 calibbias\r\n", b"4\n2048\n"),
+            (
+                b"READ iio:device0 sampling_frequency\r\n",
+                b"10\n100000000\0\n",
+            ),
+            (
+                b"READ iio:device0 INPUT voltage0 calibbias\r\n",
+                b"4\n2048\n",
+            ),
             (b"READ iio:device0 DEBUG direct_reg_access\r\n", b"-22\n"),
             (b"WRITE iio:device2 OUTPUT voltage0 raw 5\r\n2048\0", b"5\n"),
             (b"WRITE iio:device0 BUFFER watermark 2\r\n1\0", b"-13\n"),
         ]);
         assert_eq!(c.version().unwrap(), "0.25.g1234567");
-        assert_eq!(c.read_attr("iio:device0", Attr::Device("sampling_frequency")).unwrap(), "100000000");
+        assert_eq!(
+            c.read_attr("iio:device0", Attr::Device("sampling_frequency"))
+                .unwrap(),
+            "100000000"
+        );
         let calibbias = Attr::Channel {
             channel: "voltage0",
             output: false,
             attr: "calibbias",
         };
         assert_eq!(c.read_attr("iio:device0", calibbias).unwrap(), "2048");
-        let err = c.read_attr("iio:device0", Attr::Debug("direct_reg_access")).unwrap_err();
+        let err = c
+            .read_attr("iio:device0", Attr::Debug("direct_reg_access"))
+            .unwrap_err();
         assert!(matches!(err, Error::Errno { code: 22, .. }), "{err}");
         let raw = Attr::Channel {
             channel: "voltage0",
@@ -342,8 +372,13 @@ mod tests {
             attr: "raw",
         };
         c.write_attr("iio:device2", raw, "2048").unwrap();
-        let err = c.write_attr("iio:device0", Attr::Buffer("watermark"), "1").unwrap_err();
-        assert_eq!(err.to_string(), "write iio:device0 buffer:watermark = 1: permission denied (EACCES, -13)");
+        let err = c
+            .write_attr("iio:device0", Attr::Buffer("watermark"), "1")
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "write iio:device0 buffer:watermark = 1: permission denied (EACCES, -13)"
+        );
     }
 
     #[test]

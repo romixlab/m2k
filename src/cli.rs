@@ -1,0 +1,1300 @@
+//! The command tree (clap derive) and the command handlers; `--json` output goes through [`Out::print`].
+
+use crate::calib::{self, Corrections};
+use crate::conv::{self, Rail, Range};
+use crate::m2k::{self, M2k};
+use crate::{complete, parse, stats};
+use anyhow::{Context as _, Result, bail};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::ArgValueCandidates;
+use iiod_client::Attr;
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use serde_json::{Value, json};
+use std::io::{IsTerminal, Write as _};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("GIT_SHA"),
+    ", built ",
+    env!("BUILD_TIME"),
+    ")"
+);
+
+#[derive(Parser, Debug)]
+#[command(name = "m2k", version = VERSION, about, long_about = "\
+Drive an Analog Devices ADALM2000 (M2K) over the network: scope, signal generator, power supplies, voltmeter,
+logic analyzer. Talks to the iiod daemon on the M2K directly (pure Rust, no libiio).
+
+The M2K shows up as a USB network adapter and answers at 192.168.2.1. Typical use: `m2k info`, then
+`m2k scope -n 10k -r 1M`. Shell completion: `source <(COMPLETE=bash m2k)` (or zsh, fish).")]
+struct Cli {
+    /// Device: ip:HOST[:PORT] or HOST[:PORT].
+    #[arg(long, short = 'u', global = true, env = "M2K_URI", default_value = m2k::DEFAULT_URI)]
+    uri: String,
+    /// Machine-readable JSON on stdout.
+    #[arg(long, global = true)]
+    json: bool,
+    /// Connect and attribute timeout (500ms, 5s, ...); captures add their own length.
+    #[arg(long, global = true, default_value = "5s", value_parser = parse::duration)]
+    timeout: Duration,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Model, serial, firmware, calibration, temperature, outputs and supplies; any IIO device works.
+    Info {
+        /// Also list the IIO devices and their channels.
+        #[arg(long)]
+        devices: bool,
+    },
+    /// Read or write any IIO attribute (also for other IIO devices than the M2K, e.g. a Pluto).
+    Attr(AttrArgs),
+    /// User power supplies V+ (0 to 5 V) and V- (-5 to 0 V).
+    Psu {
+        #[command(subcommand)]
+        cmd: Option<PsuCmd>,
+    },
+    /// Board monitors: supply rails, temperature, FPGA voltages (slow ADCs, no scope inputs).
+    Dmm {
+        /// Only channels whose label contains one of these (e.g. temp, vccint).
+        filter: Vec<String>,
+    },
+    /// DC and AC (rms) voltage on the scope inputs 1+/1- and 2+/2-.
+    Voltmeter {
+        /// Input range: 25 (±25 V) or 2.5 (±2.5 V, finer steps).
+        #[arg(long, default_value = "25")]
+        range: RangeArg,
+    },
+    /// Capture the two scope channels: statistics per channel, optionally all samples as CSV.
+    Scope(ScopeArgs),
+    /// Signal generator outputs W1/W2: constant or periodic signal; runs until Ctrl+C or --for.
+    Gen(GenArgs),
+    /// Capture the 16 digital pins DIO0-15: state, edges and frequency per pin, optionally CSV.
+    Logic(LogicArgs),
+    /// Calibration of scope inputs and signal outputs (kept by the M2K until power-off).
+    Cal {
+        #[command(subcommand)]
+        cmd: Option<CalCmd>,
+    },
+}
+
+#[derive(Args, Debug)]
+struct AttrArgs {
+    /// Device id or name (iio:device0, m2k-adc); without it, the devices are listed.
+    #[arg(add = ArgValueCandidates::new(complete::device_names))]
+    device: Option<String>,
+    /// Attribute; without it, every attribute of the device (or channel) is read.
+    #[arg(add = ArgValueCandidates::new(complete::attr_names))]
+    attr: Option<String>,
+    /// Value to write.
+    value: Option<String>,
+    /// Channel id or name (voltage0) for a channel attribute.
+    #[arg(long, short = 'c', add = ArgValueCandidates::new(complete::channel_names))]
+    channel: Option<String>,
+    /// The channel is an output (input by default; needed when both exist, like m2k-fabric voltage0).
+    #[arg(long, short = 'o', requires = "channel")]
+    output: bool,
+    /// A debug attribute.
+    #[arg(long, conflicts_with_all = ["channel", "buffer"])]
+    debug: bool,
+    /// A buffer attribute.
+    #[arg(long, conflicts_with = "channel")]
+    buffer: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum PsuCmd {
+    /// Measured voltage and state of both rails (the default).
+    Status,
+    /// Set and switch on rails; the others stay as they are.
+    Set {
+        /// V+ in volts, 0 to 5.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse::si)]
+        pos: Option<f64>,
+        /// V- in volts, -5 to 0.
+        #[arg(long, allow_hyphen_values = true, value_parser = parse::si)]
+        neg: Option<f64>,
+    },
+    /// Switch rails off (both unless --pos or --neg).
+    Off {
+        #[arg(long)]
+        pos: bool,
+        #[arg(long)]
+        neg: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RangeArg {
+    #[value(name = "25")]
+    V25,
+    #[value(name = "2.5")]
+    V2_5,
+}
+
+impl From<RangeArg> for Range {
+    fn from(r: RangeArg) -> Range {
+        match r {
+            RangeArg::V25 => Range::V25,
+            RangeArg::V2_5 => Range::V2_5,
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+struct ScopeArgs {
+    /// Samples per channel (10k, 1M; at most 8M).
+    #[arg(short = 'n', long, default_value = "10k", value_parser = parse::count)]
+    samples: usize,
+    /// Sample rate (1k to 100M); rates between the native 1k/10k/.../100M are made by averaging.
+    #[arg(short = 'r', long, default_value = "1M", value_parser = parse::si)]
+    rate: f64,
+    /// Input range of both channels: 25 (±25 V) or 2.5 (±2.5 V).
+    #[arg(long, default_value = "25")]
+    range: RangeArg,
+    /// Range of channel 1 only.
+    #[arg(long)]
+    range1: Option<RangeArg>,
+    /// Range of channel 2 only.
+    #[arg(long)]
+    range2: Option<RangeArg>,
+    /// Write all samples as CSV: time_s,ch1_v,ch2_v.
+    #[arg(long)]
+    csv: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct GenArgs {
+    /// Outputs: 1 (W1), 2 (W2) or 1,2.
+    #[arg(short = 'c', long, default_value = "1", value_parser = gen_channels)]
+    channel: Outputs,
+    /// Stop after this long (10s, 1m) instead of at Ctrl+C.
+    #[arg(long = "for", value_parser = parse::duration)]
+    duration: Option<Duration>,
+    #[command(subcommand)]
+    shape: Shape,
+}
+
+/// Output indices, 0 = W1.
+#[derive(Debug, Clone, PartialEq)]
+struct Outputs(Vec<usize>);
+
+fn gen_channels(text: &str) -> Result<Outputs> {
+    let list = parse::list(text, 2)?;
+    if list.contains(&0) {
+        bail!("outputs are 1 (W1) and 2 (W2)");
+    }
+    Ok(Outputs(list.into_iter().map(|c| c as usize - 1).collect()))
+}
+
+/// Digital pin numbers.
+#[derive(Debug, Clone, PartialEq)]
+struct Pins(Vec<u32>);
+
+#[derive(Subcommand, Debug, Clone)]
+enum Shape {
+    /// A constant voltage, -5 to 5 V.
+    Const {
+        #[arg(allow_hyphen_values = true, value_parser = parse::si)]
+        volts: f64,
+    },
+    Sine(Periodic),
+    Square(Periodic),
+    Triangle(Periodic),
+    /// Rising ramp.
+    Sawtooth(Periodic),
+    /// Switch the outputs off (the amplifier; a buffer of another `m2k gen` ends with that process).
+    Off,
+}
+
+#[derive(Args, Debug, Clone)]
+struct Periodic {
+    /// Frequency (1k, 2.5M).
+    #[arg(short, long, value_parser = parse::si)]
+    freq: f64,
+    /// Amplitude in volts, peak (a 1 V sine swings from -1 to +1 V around the offset).
+    #[arg(short, long, default_value = "1", value_parser = parse::si)]
+    amp: f64,
+    /// DC offset in volts.
+    #[arg(short, long, default_value = "0", allow_hyphen_values = true, value_parser = parse::si)]
+    offset: f64,
+    /// Phase in degrees.
+    #[arg(long, default_value = "0", allow_hyphen_values = true)]
+    phase: f64,
+    /// Share of the period high, in percent (square only).
+    #[arg(long, default_value = "50")]
+    duty: f64,
+}
+
+#[derive(Args, Debug)]
+struct LogicArgs {
+    /// Samples (10k, 1M; at most 8M).
+    #[arg(short = 'n', long, default_value = "10k", value_parser = parse::count)]
+    samples: usize,
+    /// Sample rate (up to 100M).
+    #[arg(short = 'r', long, default_value = "1M", value_parser = parse::si)]
+    rate: f64,
+    /// Pins to report: 0-15, 0-3,7.
+    #[arg(short = 'p', long, default_value = "0-15", value_parser = |s: &str| parse::list(s, 15).map(Pins))]
+    pins: Pins,
+    /// Write all samples as CSV: time_s and one column per reported pin.
+    #[arg(long)]
+    csv: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+enum CalCmd {
+    /// Corrections the M2K holds, and whether it was calibrated since power-up (the default).
+    Status,
+    /// Self-calibrate (about 5 s): scope inputs, then the outputs (W1/W2 are driven to ~2.5 V for a moment).
+    Run {
+        /// Only the scope inputs; the outputs are left alone.
+        #[arg(long)]
+        adc_only: bool,
+    },
+    /// Load the factory calibration table entry closest to the board temperature (cal,temp_lut).
+    Lut,
+    /// Back to the power-on values: no corrections.
+    Reset,
+}
+
+/// Output of a command: text for people, or JSON with `--json`.
+struct Out {
+    json: bool,
+}
+
+impl Out {
+    fn print(&self, text: impl AsRef<str>, value: Value) {
+        if self.json {
+            println!("{value}");
+        } else {
+            let text = text.as_ref();
+            if !text.is_empty() {
+                println!("{}", text.trim_end());
+            }
+        }
+    }
+
+    /// A warning on stderr (text mode only; in JSON it is part of the value).
+    fn warn(&self, text: &str) {
+        if !self.json {
+            eprintln!("{} {text}", style::yellow("warning:"));
+        }
+    }
+
+    /// A progress bar on stderr when a person watches; hidden otherwise.
+    fn progress(&self, len: u64, msg: &str) -> ProgressBar {
+        let bar = ProgressBar::with_draw_target(Some(len), ProgressDrawTarget::stderr());
+        if self.json || !std::io::stderr().is_terminal() {
+            bar.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        bar.set_style(
+            ProgressStyle::with_template(
+                "{msg} [{bar:30.cyan/blue}] {bytes}/{total_bytes} {bytes_per_sec} {eta}",
+            )
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
+            .progress_chars("=> "),
+        );
+        bar.set_message(msg.to_string());
+        bar
+    }
+
+    fn spinner(&self, msg: &str) -> ProgressBar {
+        let bar = ProgressBar::new_spinner();
+        if self.json || !std::io::stderr().is_terminal() {
+            bar.set_draw_target(ProgressDrawTarget::hidden());
+        }
+        bar.enable_steady_tick(Duration::from_millis(100));
+        bar.set_message(msg.to_string());
+        bar
+    }
+}
+
+/// Colour on stdout/stderr when it is a terminal and `NO_COLOR` is not set.
+mod style {
+    use std::io::IsTerminal;
+    use std::sync::OnceLock;
+
+    fn on() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+                && std::io::stderr().is_terminal()
+                && std::io::stdout().is_terminal()
+        })
+    }
+
+    fn paint(code: &str, text: &str) -> String {
+        if on() {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+
+    pub fn bold(t: &str) -> String {
+        paint("1", t)
+    }
+    pub fn green(t: &str) -> String {
+        paint("32", t)
+    }
+    pub fn yellow(t: &str) -> String {
+        paint("33", t)
+    }
+    pub fn red(t: &str) -> String {
+        paint("31", t)
+    }
+    pub fn dim(t: &str) -> String {
+        paint("2", t)
+    }
+}
+
+pub fn main() {
+    complete::complete(Cli::command);
+    let cli = Cli::parse();
+    let json = cli.json;
+    if let Err(e) = run(cli) {
+        if json {
+            println!("{}", json!({ "error": format!("{e:#}") }));
+        } else {
+            eprintln!("{} {e:#}", style::red("error:"));
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
+    let out = Out { json: cli.json };
+    let connect = || M2k::connect(&cli.uri, cli.timeout);
+    match cli.cmd {
+        Cmd::Info { devices } => info(&out, &mut connect()?, devices),
+        Cmd::Attr(args) => attr(&out, &mut connect()?, args),
+        Cmd::Psu { cmd } => psu(
+            &out,
+            &mut m2k_connect(connect)?,
+            cmd.unwrap_or(PsuCmd::Status),
+        ),
+        Cmd::Dmm { filter } => dmm(&out, &mut connect()?, &filter),
+        Cmd::Voltmeter { range } => voltmeter(&out, &mut m2k_connect(connect)?, range.into()),
+        Cmd::Scope(args) => scope(&out, &mut m2k_connect(connect)?, args),
+        Cmd::Gen(args) => gen_cmd(&out, &mut m2k_connect(connect)?, args),
+        Cmd::Logic(args) => logic(&out, &mut m2k_connect(connect)?, args),
+        Cmd::Cal { cmd } => cal(
+            &out,
+            &mut m2k_connect(connect)?,
+            cmd.unwrap_or(CalCmd::Status),
+        ),
+    }
+}
+
+fn m2k_connect(connect: impl FnOnce() -> Result<M2k>) -> Result<M2k> {
+    let mut m = connect()?;
+    m.require_m2k()?;
+    m.init().context("power up the M2K")?;
+    Ok(m)
+}
+
+fn on_off(on: bool) -> String {
+    if on {
+        style::green("on")
+    } else {
+        style::dim("off")
+    }
+}
+
+// ---- info ----
+
+fn info(out: &Out, m: &mut M2k, devices: bool) -> Result<()> {
+    let version = m.client.version().unwrap_or_default();
+    let ctx_attrs: serde_json::Map<String, Value> = m
+        .ctx
+        .attrs
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+        .collect();
+    let model = m
+        .ctx
+        .attr("hw_model")
+        .unwrap_or("unknown model")
+        .to_string();
+    let serial = m.ctx.attr("hw_serial").unwrap_or("unknown").to_string();
+    let firmware = m.ctx.attr("fw_version").unwrap_or("unknown").to_string();
+    let is_m2k = m.require_m2k().is_ok();
+    let mut text = format!(
+        "{} at {} (iiod {version})\nmodel: {model}\nserial: {serial}\nfirmware: {firmware}{}\n",
+        style::bold(if is_m2k { "ADALM2000" } else { "IIO context" }),
+        m.uri,
+        m.ctx
+            .attr("local,kernel")
+            .map(|k| format!(", kernel {k}"))
+            .unwrap_or_default(),
+    );
+    let mut value = json!({
+        "uri": m.uri,
+        "iiod_version": version,
+        "model": model,
+        "serial": serial,
+        "firmware": firmware,
+        "m2k": is_m2k,
+        "context": ctx_attrs,
+    });
+    if is_m2k {
+        let corr = Corrections::read(m)?;
+        let temperature = m.temperature().ok();
+        let outputs = [m.dac_enabled(0)?, m.dac_enabled(1)?];
+        let supplies = [m.psu_enabled(Rail::Pos)?, m.psu_enabled(Rail::Neg)?];
+        let lut = m.ctx.attr("cal,temp_lut").is_some();
+        text += &format!(
+            "calibration: {}{}\n",
+            if corr.calibrated() {
+                style::green("calibrated since power-up")
+            } else {
+                style::yellow("not calibrated since power-up (run `m2k cal run`)")
+            },
+            if lut {
+                ", factory table available (`m2k cal lut`)"
+            } else {
+                ""
+            }
+        );
+        if let Some(t) = temperature {
+            text += &format!("temperature: {t:.1} °C\n");
+        }
+        text += &format!(
+            "outputs: W1 {}, W2 {}\nsupplies: V+ {}, V- {}\n",
+            on_off(outputs[0]),
+            on_off(outputs[1]),
+            on_off(supplies[0]),
+            on_off(supplies[1])
+        );
+        value["calibration"] = corr.json();
+        value["calibration"]["factory_table"] = json!(lut);
+        value["temperature"] = json!(temperature);
+        value["outputs"] = json!({ "w1": outputs[0], "w2": outputs[1] });
+        value["supplies"] = json!({ "pos": supplies[0], "neg": supplies[1] });
+    }
+    text += &format!("{} IIO devices", m.ctx.devices.len());
+    if devices {
+        text += ":\n";
+        for d in &m.ctx.devices {
+            let chans: Vec<String> = d
+                .channels
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}{}{}",
+                        if c.output { "out:" } else { "" },
+                        c.id,
+                        if c.scan.is_some() { "*" } else { "" }
+                    )
+                })
+                .collect();
+            text += &format!("  {}: {}\n", d.label(), chans.join(" "));
+        }
+        text += &style::dim("  (* = can be captured or played through a buffer)");
+    } else {
+        text += &style::dim(" (`m2k info --devices`)");
+    }
+    value["devices"] = m
+        .ctx
+        .devices
+        .iter()
+        .map(|d| {
+            json!({
+                "id": d.id,
+                "name": d.name,
+                "attrs": d.attrs,
+                "channels": d.channels.iter().map(|c| json!({
+                    "id": c.id, "name": c.name, "output": c.output, "buffered": c.scan.is_some(), "attrs": c.attrs,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    out.print(text, value);
+    Ok(())
+}
+
+// ---- attr ----
+
+fn attr(out: &Out, m: &mut M2k, args: AttrArgs) -> Result<()> {
+    let Some(dev_name) = args.device else {
+        let text: Vec<String> = m.ctx.devices.iter().map(|d| d.label()).collect();
+        let value: Vec<Value> = m
+            .ctx
+            .devices
+            .iter()
+            .map(|d| json!({ "id": d.id, "name": d.name }))
+            .collect();
+        out.print(text.join("\n"), json!({ "devices": value }));
+        return Ok(());
+    };
+    let dev = m.device(&dev_name)?.clone();
+    let channel = match &args.channel {
+        Some(c) => {
+            let chn = dev
+                .channel(c, args.output)
+                .or_else(|| (!args.output).then(|| dev.channel(c, true)).flatten())
+                .with_context(|| {
+                    format!(
+                        "{} has no {} channel `{c}` ({})",
+                        dev.label(),
+                        if args.output {
+                            "output"
+                        } else {
+                            "input or output"
+                        },
+                        dev.channels
+                            .iter()
+                            .map(|c| c.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                })?;
+            Some(chn.clone())
+        }
+        None => None,
+    };
+    let (debug, buffer) = (args.debug, args.buffer);
+    let names: Vec<String> = match (&channel, args.debug, args.buffer) {
+        (Some(c), _, _) => c.attrs.clone(),
+        (None, true, _) => dev.debug_attrs.clone(),
+        (None, _, true) => dev.buffer_attrs.clone(),
+        (None, false, false) => dev.attrs.clone(),
+    };
+    let Some(name) = args.attr else {
+        // everything, with values
+        let mut text = vec![];
+        let mut values = serde_json::Map::new();
+        for n in &names {
+            let v = m
+                .client
+                .read_attr(&dev.id, attr_of(channel.as_ref(), n, debug, buffer));
+            let shown = match &v {
+                Ok(v) => v.clone(),
+                Err(e) => format!("({e})"),
+            };
+            text.push(format!("{n} = {shown}"));
+            values.insert(n.clone(), v.map(Value::String).unwrap_or(Value::Null));
+        }
+        if channel.is_none() && !args.debug && !args.buffer && !dev.channels.is_empty() {
+            let chans: Vec<String> = dev
+                .channels
+                .iter()
+                .map(|c| format!("{}{}", if c.output { "out:" } else { "" }, c.id))
+                .collect();
+            text.push(style::dim(&format!(
+                "channels (-c ID): {}",
+                chans.join(" ")
+            )));
+        }
+        out.print(text.join("\n"), json!({ "device": dev.id, "channel": channel.as_ref().map(|c| &c.id), "attrs": values }));
+        return Ok(());
+    };
+    if !names.contains(&name) {
+        out.warn(&format!(
+            "`{name}` is not listed in the context ({}); trying anyway",
+            names.join(" ")
+        ));
+    }
+    let what = attr_of(channel.as_ref(), &name, debug, buffer);
+    if let Some(value) = args.value {
+        m.client.write_attr(&dev.id, what, &value)?;
+    }
+    let value = m.client.read_attr(&dev.id, what)?;
+    out.print(
+        &value,
+        json!({ "device": dev.id, "attr": what.to_string(), "value": value }),
+    );
+    Ok(())
+}
+
+fn attr_of<'a>(
+    channel: Option<&'a iiod_client::Channel>,
+    name: &'a str,
+    debug: bool,
+    buffer: bool,
+) -> Attr<'a> {
+    match channel {
+        Some(c) => Attr::Channel {
+            channel: &c.id,
+            output: c.output,
+            attr: name,
+        },
+        None if debug => Attr::Debug(name),
+        None if buffer => Attr::Buffer(name),
+        None => Attr::Device(name),
+    }
+}
+
+// ---- psu ----
+
+fn psu_status(m: &mut M2k) -> Result<(String, Value)> {
+    let mut text = vec![];
+    let mut value = serde_json::Map::new();
+    for rail in [Rail::Pos, Rail::Neg] {
+        let on = m.psu_enabled(rail)?;
+        let volts = m.psu_read(rail)?;
+        text.push(format!(
+            "{}: {} {:+.3} V measured",
+            rail.name(),
+            on_off(on),
+            volts
+        ));
+        value.insert(
+            if rail == Rail::Pos { "pos" } else { "neg" }.into(),
+            json!({ "enabled": on, "measured": volts }),
+        );
+    }
+    Ok((text.join("\n"), Value::Object(value)))
+}
+
+fn psu(out: &Out, m: &mut M2k, cmd: PsuCmd) -> Result<()> {
+    match cmd {
+        PsuCmd::Status => {}
+        PsuCmd::Set { pos, neg } => {
+            if pos.is_none() && neg.is_none() {
+                bail!("give --pos VOLTS and/or --neg VOLTS");
+            }
+            for (rail, volts) in [(Rail::Pos, pos), (Rail::Neg, neg)] {
+                if let Some(v) = volts {
+                    // check both before switching anything on
+                    conv::psu_volts_to_raw(rail, v, conv::RailCal::IDENTITY)?;
+                }
+            }
+            for (rail, volts) in [(Rail::Pos, pos), (Rail::Neg, neg)] {
+                if let Some(v) = volts {
+                    m.psu_set(rail, v)?;
+                    m.psu_enable(rail, true)?;
+                }
+            }
+            // the rails settle within a few ms; the monitor ADC needs a moment too
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        PsuCmd::Off { pos, neg } => {
+            let both = !pos && !neg;
+            for (rail, chosen) in [(Rail::Pos, pos), (Rail::Neg, neg)] {
+                if both || chosen {
+                    m.psu_enable(rail, false)?;
+                    m.psu_set(rail, 0.0)?;
+                }
+            }
+        }
+    }
+    let (text, value) = psu_status(m)?;
+    out.print(text, value);
+    Ok(())
+}
+
+// ---- dmm ----
+
+fn dmm(out: &Out, m: &mut M2k, filter: &[String]) -> Result<()> {
+    let channels = m.dmm_channels();
+    if channels.is_empty() {
+        bail!("{} has no monitor ADC channels (ad9963, xadc)", m.uri);
+    }
+    let mut text = vec![];
+    let mut values = vec![];
+    for (dev, chn, label) in channels {
+        if !filter.is_empty() && !filter.iter().any(|f| label.contains(f.as_str())) {
+            continue;
+        }
+        let (v, unit) = m.dmm_read(&dev, &chn)?;
+        text.push(format!("{label}: {v:.4} {unit}"));
+        values
+            .push(json!({ "channel": label, "device": dev, "id": chn, "value": v, "unit": unit }));
+    }
+    if values.is_empty() {
+        bail!("no monitor channel matches {}", filter.join(", "));
+    }
+    out.print(text.join("\n"), json!({ "readings": values }));
+    Ok(())
+}
+
+// ---- scope ----
+
+/// A capture of both scope channels, in volts.
+struct Capture {
+    rate: f64,
+    volts: [Vec<f64>; 2],
+    stats: [stats::Analog; 2],
+    ranges: [Range; 2],
+    calibrated: bool,
+}
+
+fn capture(
+    out: &Out,
+    m: &mut M2k,
+    samples: usize,
+    rate: f64,
+    ranges: [Range; 2],
+) -> Result<Capture> {
+    let available = m.rates(m2k::ADC)?;
+    let (base, ratio, actual) = conv::plan_adc_rate(rate, &available)?;
+    if (actual - rate).abs() > rate * 1e-6 {
+        out.warn(&format!(
+            "{} is not available, capturing at {}",
+            parse::fmt_unit(rate, "S/s"),
+            parse::fmt_unit(actual, "S/s")
+        ));
+    }
+    let state = m.adc_configure(base, ratio, ranges)?;
+    let secs = samples as f64 / state.rate();
+    m.allow(secs)?;
+    let bytes = (samples.next_multiple_of(m2k::BUFFER_STEP) * 4) as u64;
+    let bar = (secs > 1.0 || samples > 500_000).then(|| out.progress(bytes, "capture"));
+    let raw = m.adc_capture(samples, |n| {
+        if let Some(b) = &bar {
+            b.set_position(n as u64);
+        }
+    })?;
+    if let Some(b) = bar {
+        b.finish_and_clear();
+    }
+    let mut volts = [vec![], vec![]];
+    let mut st = vec![];
+    for i in 0..2 {
+        let scale = state.scale(i)?;
+        volts[i] = raw[i].iter().map(|r| scale.volts(*r)).collect();
+        let clipped = raw[i]
+            .iter()
+            .filter(|r| **r <= conv::ADC_RAW_MIN || **r >= conv::ADC_RAW_MAX)
+            .count();
+        // ten ADC steps: below that a "frequency" is noise
+        st.push(stats::analog(
+            &volts[i],
+            state.rate(),
+            clipped,
+            10.0 * scale.volts_per_lsb(),
+        ));
+    }
+    let [s1, s2]: [stats::Analog; 2] =
+        st.try_into().map_err(|_| anyhow::anyhow!("two channels"))?;
+    Ok(Capture {
+        rate: state.rate(),
+        volts,
+        stats: [s1, s2],
+        ranges: [state.channels[0].range, state.channels[1].range],
+        calibrated: !state.uncalibrated(),
+    })
+}
+
+fn analog_line(name: &str, s: &stats::Analog) -> String {
+    let mut parts = vec![];
+    if let Some(f) = s.frequency {
+        parts.push(format!(
+            "{} ({} periods)",
+            parse::fmt_unit(f, "Hz"),
+            s.periods
+        ));
+        if let Some(d) = s.duty {
+            parts.push(format!("duty {:.0} %", d * 100.0));
+        }
+    }
+    parts.push(format!("mean {:+.4} V", s.mean));
+    parts.push(format!("vpp {:.4} V", s.vpp()));
+    parts.push(format!("min {:+.4} V", s.min));
+    parts.push(format!("max {:+.4} V", s.max));
+    parts.push(format!("rms {:.4} V", s.rms));
+    parts.push(format!("ac rms {:.4} V", s.ac_rms));
+    format!("{}: {}", style::bold(name), parts.join(", "))
+}
+
+fn capture_warnings(out: &Out, cap: &Capture) -> Vec<String> {
+    let mut warnings = vec![];
+    if !cap.calibrated {
+        warnings.push("the M2K was not calibrated since power-up: offsets can be tens of mV off; `m2k cal run` (5 s) fixes that".to_string());
+    }
+    for i in 0..2 {
+        if cap.stats[i].clipped > 0 {
+            warnings.push(format!(
+                "ch{} hit the end of the ±{} V range in {} samples: the signal is larger than shown{}",
+                i + 1,
+                cap.ranges[i].limit(),
+                cap.stats[i].clipped,
+                if cap.ranges[i] == Range::V2_5 { "; use --range 25" } else { "" }
+            ));
+        }
+    }
+    for w in &warnings {
+        out.warn(w);
+    }
+    warnings
+}
+
+fn scope(out: &Out, m: &mut M2k, args: ScopeArgs) -> Result<()> {
+    let ranges = [
+        args.range1.unwrap_or(args.range).into(),
+        args.range2.unwrap_or(args.range).into(),
+    ];
+    let cap = capture(out, m, args.samples, args.rate, ranges)?;
+    let warnings = capture_warnings(out, &cap);
+    let mut text = format!(
+        "scope: {} samples at {} ({}), ranges ±{} V / ±{} V, {}\n",
+        args.samples,
+        parse::fmt_unit(cap.rate, "S/s"),
+        parse::fmt_secs(args.samples as f64 / cap.rate),
+        cap.ranges[0].limit(),
+        cap.ranges[1].limit(),
+        if cap.calibrated {
+            "calibrated"
+        } else {
+            "uncalibrated"
+        }
+    );
+    for i in 0..2 {
+        text += &analog_line(&format!("ch{}", i + 1), &cap.stats[i]);
+        text.push('\n');
+    }
+    let mut value = json!({
+        "samples": args.samples,
+        "rate": cap.rate,
+        "ranges": [cap.ranges[0].limit(), cap.ranges[1].limit()],
+        "calibrated": cap.calibrated,
+        "ch1": cap.stats[0].json(),
+        "ch2": cap.stats[1].json(),
+        "warnings": warnings,
+    });
+    if let Some(path) = args.csv {
+        let mut rows = String::with_capacity(args.samples * 32);
+        rows.push_str("time_s,ch1_v,ch2_v\n");
+        for k in 0..cap.volts[0].len() {
+            rows += &format!(
+                "{:.9},{:.5},{:.5}\n",
+                k as f64 / cap.rate,
+                cap.volts[0][k],
+                cap.volts[1][k]
+            );
+        }
+        write_file(&path, rows.as_bytes())?;
+        text += &format!(
+            "csv: {} ({} rows: time_s,ch1_v,ch2_v)",
+            path.display(),
+            args.samples
+        );
+        value["csv"] = json!(path.display().to_string());
+    }
+    out.print(text, value);
+    Ok(())
+}
+
+/// Writes to a temporary name next to `path`, then moves it in place.
+fn write_file(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("part");
+    let mut f = std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    f.write_all(data)
+        .with_context(|| format!("write {}", tmp.display()))?;
+    drop(f);
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("move {} to {}", tmp.display(), path.display()))
+}
+
+// ---- voltmeter ----
+
+fn voltmeter(out: &Out, m: &mut M2k, range: Range) -> Result<()> {
+    // 100 ms at 100 kS/s: whole periods of 50 and 60 Hz mains, so hum averages out of the DC value
+    let cap = capture(out, m, 10_000, 100e3, [range, range])?;
+    let warnings = capture_warnings(out, &cap);
+    let mut text = vec![];
+    let mut value =
+        json!({ "range": range.limit(), "calibrated": cap.calibrated, "warnings": warnings });
+    for i in 0..2 {
+        let s = &cap.stats[i];
+        text.push(format!(
+            "{}: {:+.4} V DC, {:.4} V AC rms",
+            style::bold(&format!("ch{}", i + 1)),
+            s.mean,
+            s.ac_rms
+        ));
+        value[format!("ch{}", i + 1)] =
+            json!({ "dc": s.mean, "ac_rms": s.ac_rms, "min": s.min, "max": s.max });
+    }
+    out.print(text.join("\n"), value);
+    Ok(())
+}
+
+// ---- gen ----
+
+/// One period-filled buffer of a shape, and what it really is.
+struct Wave {
+    rate: f64,
+    volts: Vec<f64>,
+    frequency: Option<f64>,
+    text: String,
+}
+
+fn build_wave(shape: &Shape, rates: &[f64]) -> Result<Wave> {
+    let check = |lo: f64, hi: f64| -> Result<()> {
+        if lo < -conv::DAC_LIMIT - 1e-9 || hi > conv::DAC_LIMIT + 1e-9 {
+            bail!("the signal goes from {lo:.3} to {hi:.3} V; the outputs swing -5 to 5 V");
+        }
+        Ok(())
+    };
+    match shape {
+        Shape::Const { volts } => {
+            check(*volts, *volts)?;
+            let rate = rates.iter().copied().fold(f64::NAN, f64::max);
+            Ok(Wave {
+                rate,
+                volts: vec![*volts; 256],
+                frequency: None,
+                text: format!("constant {volts:+.3} V"),
+            })
+        }
+        Shape::Off => bail!("`off` is not a signal"),
+        Shape::Sine(p) | Shape::Square(p) | Shape::Triangle(p) | Shape::Sawtooth(p) => {
+            if p.amp < 0.0 {
+                bail!("amplitude must not be negative");
+            }
+            check(p.offset - p.amp, p.offset + p.amp)?;
+            if !(0.0..=100.0).contains(&p.duty) {
+                bail!("duty is 0 to 100 %");
+            }
+            let plan = conv::plan_wave(p.freq, rates)?;
+            let name = match shape {
+                Shape::Sine(_) => "sine",
+                Shape::Square(_) => "square",
+                Shape::Triangle(_) => "triangle",
+                _ => "sawtooth",
+            };
+            let phase0 = p.phase / 360.0;
+            let volts = (0..plan.samples)
+                .map(|k| {
+                    let x = (k as f64 * plan.periods as f64 / plan.samples as f64 + phase0)
+                        .rem_euclid(1.0);
+                    let unit = match shape {
+                        Shape::Sine(_) => (std::f64::consts::TAU * x).sin(),
+                        Shape::Square(_) => {
+                            if x < p.duty / 100.0 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
+                        }
+                        Shape::Triangle(_) => 1.0 - 4.0 * (x - 0.5).abs(),
+                        _ => 2.0 * x - 1.0,
+                    };
+                    p.offset + p.amp * unit
+                })
+                .collect();
+            Ok(Wave {
+                rate: plan.sample_rate,
+                volts,
+                frequency: Some(plan.frequency()),
+                text: format!(
+                    "{name} {}, {:.3} V peak, offset {:+.3} V ({} samples at {})",
+                    parse::fmt_unit(plan.frequency(), "Hz"),
+                    p.amp,
+                    p.offset,
+                    plan.samples,
+                    parse::fmt_unit(plan.sample_rate, "S/s")
+                ),
+            })
+        }
+    }
+}
+
+fn gen_cmd(out: &Out, m: &mut M2k, args: GenArgs) -> Result<()> {
+    let channels = args.channel.0;
+    let names: Vec<String> = channels.iter().map(|c| format!("W{}", c + 1)).collect();
+    if matches!(args.shape, Shape::Off) {
+        for c in &channels {
+            m.dac_stop(*c)?;
+        }
+        out.print(
+            format!("{}: off", names.join(", ")),
+            json!({ "outputs": names, "running": false }),
+        );
+        return Ok(());
+    }
+    let rates = m.rates(m2k::DACS[0])?;
+    let wave = build_wave(&args.shape, &rates)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst))
+            .context("install the Ctrl+C handler")?;
+    }
+    let started = m.dac_start(&channels, wave.rate, &wave.volts);
+    if let Err(e) = started {
+        for c in &channels {
+            let _ = m.dac_stop(*c);
+        }
+        return Err(e);
+    }
+    let until = match args.duration {
+        Some(d) => format!("for {}", parse::fmt_secs(d.as_secs_f64())),
+        None => "until Ctrl+C".to_string(),
+    };
+    out.print(
+        format!("{}: {}; running {until}", names.join(", "), wave.text),
+        json!({
+            "outputs": names,
+            "running": true,
+            "shape": wave.text,
+            "frequency": wave.frequency,
+            "sample_rate": wave.rate,
+            "samples": wave.volts.len(),
+            "duration": args.duration.map(|d| d.as_secs_f64()),
+        }),
+    );
+    let _ = std::io::stdout().flush();
+    let start = Instant::now();
+    while !stop.load(Ordering::SeqCst) && args.duration.is_none_or(|d| start.elapsed() < d) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    for c in &channels {
+        m.dac_stop(*c)?;
+    }
+    if !out.json {
+        eprintln!(
+            "{}: off after {}",
+            names.join(", "),
+            parse::fmt_secs(start.elapsed().as_secs_f64())
+        );
+    }
+    Ok(())
+}
+
+// ---- logic ----
+
+fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
+    let pins = args.pins.0;
+    let secs = args.samples as f64 / args.rate;
+    let bar = (secs > 1.0 || args.samples > 1_000_000)
+        .then(|| out.progress((args.samples.next_multiple_of(4) * 2) as u64, "capture"));
+    let (words, rate) = m.logic_capture(args.samples, args.rate, |n| {
+        if let Some(b) = &bar {
+            b.set_position(n as u64);
+        }
+    })?;
+    if let Some(b) = bar {
+        b.finish_and_clear();
+    }
+    if (rate - args.rate).abs() > args.rate * 1e-6 {
+        out.warn(&format!(
+            "logic runs at {}, not {}",
+            parse::fmt_unit(rate, "S/s"),
+            parse::fmt_unit(args.rate, "S/s")
+        ));
+    }
+    let directions = m.logic_directions().unwrap_or_default();
+    let mut text = format!(
+        "logic: {} samples at {} ({})\n",
+        args.samples,
+        parse::fmt_unit(rate, "S/s"),
+        parse::fmt_secs(args.samples as f64 / rate)
+    );
+    let mut low = vec![];
+    let mut high = vec![];
+    let mut values = vec![];
+    for pin in &pins {
+        let d = stats::digital(&words, *pin, rate);
+        let dir = directions.get(*pin as usize).cloned().unwrap_or_default();
+        let mut v = d.json();
+        v["direction"] = json!(dir);
+        values.push(v);
+        let tag = if dir == "out" { " (output)" } else { "" };
+        match d.state() {
+            "low" => low.push(format!("{pin}{tag}")),
+            "high" => high.push(format!("{pin}{tag}")),
+            _ => {
+                let mut parts = vec![
+                    format!("{} edges", d.edges()),
+                    format!("{:.0} % high", d.high * 100.0),
+                ];
+                if let Some(f) = d.frequency {
+                    parts.insert(0, parse::fmt_unit(f, "Hz"));
+                }
+                if let Some(p) = d.min_pulse {
+                    parts.push(format!("shortest pulse {}", parse::fmt_secs(p)));
+                }
+                text += &format!(
+                    "{}: toggling, {}{tag}\n",
+                    style::bold(&format!("DIO{pin}")),
+                    parts.join(", ")
+                );
+            }
+        }
+    }
+    if !high.is_empty() {
+        text += &format!("high: DIO {}\n", high.join(", "));
+    }
+    if !low.is_empty() {
+        text += &format!("low: DIO {}\n", low.join(", "));
+    }
+    let mut value = json!({ "samples": args.samples, "rate": rate, "pins": values });
+    if let Some(path) = args.csv {
+        let mut rows = String::from("time_s");
+        for p in &pins {
+            rows += &format!(",dio{p}");
+        }
+        rows.push('\n');
+        for (k, w) in words.iter().enumerate() {
+            rows += &format!("{:.9}", k as f64 / rate);
+            for p in &pins {
+                rows += if w >> p & 1 == 1 { ",1" } else { ",0" };
+            }
+            rows.push('\n');
+        }
+        write_file(&path, rows.as_bytes())?;
+        text += &format!("csv: {} ({} rows)", path.display(), words.len());
+        value["csv"] = json!(path.display().to_string());
+    }
+    out.print(text, value);
+    Ok(())
+}
+
+// ---- cal ----
+
+fn cal(out: &Out, m: &mut M2k, cmd: CalCmd) -> Result<()> {
+    match cmd {
+        CalCmd::Status => {
+            let c = Corrections::read(m)?;
+            let head = if c.calibrated() {
+                style::green("calibrated since power-up")
+            } else {
+                style::yellow("not calibrated since power-up (`m2k cal run`)")
+            };
+            out.print(format!("{head}\n{}", c.text()), c.json());
+        }
+        CalCmd::Run { adc_only } => {
+            let start = Instant::now();
+            let bar = out.spinner("calibrating");
+            let mut step = |s: &str| bar.set_message(s.to_string());
+            let res = calib::calibrate_adc(m, &mut step).and_then(|(_, adc_gain)| {
+                if adc_only {
+                    Ok(())
+                } else {
+                    calib::calibrate_dac(m, adc_gain, &mut step).map(|_| ())
+                }
+            });
+            bar.finish_and_clear();
+            res?;
+            let c = Corrections::read(m)?;
+            let mut v = c.json();
+            v["seconds"] = json!(start.elapsed().as_secs_f64());
+            v["adc_only"] = json!(adc_only);
+            out.print(
+                format!(
+                    "{} in {}\n{}",
+                    style::green(if adc_only {
+                        "scope calibrated"
+                    } else {
+                        "scope and outputs calibrated"
+                    }),
+                    parse::fmt_secs(start.elapsed().as_secs_f64()),
+                    c.text()
+                ),
+                v,
+            );
+        }
+        CalCmd::Lut => {
+            let (temperature, row) = calib::apply_lut(m)?;
+            let c = Corrections::read(m)?;
+            let mut v = c.json();
+            v["temperature"] = json!(temperature);
+            v["table_temperature"] = json!(row.temperature);
+            out.print(
+                format!(
+                    "factory calibration for {:.1} °C loaded (board at {temperature:.1} °C)\n{}",
+                    row.temperature,
+                    c.text()
+                ),
+                v,
+            );
+        }
+        CalCmd::Reset => {
+            calib::reset(m)?;
+            let c = Corrections::read(m)?;
+            out.print(
+                format!("corrections reset to power-on values\n{}", c.text()),
+                c.json(),
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATES: [f64; 6] = [750.0, 7500.0, 75e3, 75e4, 75e5, 75e6];
+
+    fn periodic(freq: f64, amp: f64, offset: f64) -> Periodic {
+        Periodic {
+            freq,
+            amp,
+            offset,
+            phase: 0.0,
+            duty: 50.0,
+        }
+    }
+
+    #[test]
+    fn waves() {
+        let w = build_wave(&Shape::Sine(periodic(1000.0, 1.0, 0.5)), &RATES).unwrap();
+        assert_eq!(w.volts.len(), 75000);
+        let max = w.volts.iter().copied().fold(f64::MIN, f64::max);
+        let min = w.volts.iter().copied().fold(f64::MAX, f64::min);
+        assert!(
+            (max - 1.5).abs() < 1e-6 && (min + 0.5).abs() < 1e-6,
+            "{min} {max}"
+        );
+        let t = build_wave(&Shape::Triangle(periodic(1e6, 2.0, 0.0)), &RATES).unwrap();
+        let max = t.volts.iter().copied().fold(f64::MIN, f64::max);
+        let min = t.volts.iter().copied().fold(f64::MAX, f64::min);
+        assert!(
+            max <= 2.0 + 1e-9 && min >= -2.0 - 1e-9 && max > 1.5 && min < -1.5,
+            "{min} {max}"
+        );
+        let sq = build_wave(
+            &Shape::Square(Periodic {
+                duty: 25.0,
+                ..periodic(1e6, 1.0, 0.0)
+            }),
+            &RATES,
+        )
+        .unwrap();
+        let high = sq.volts.iter().filter(|v| **v > 0.0).count() as f64 / sq.volts.len() as f64;
+        assert!((high - 0.25).abs() < 0.02, "{high}");
+        let c = build_wave(&Shape::Const { volts: -1.25 }, &RATES).unwrap();
+        assert_eq!(c.rate, 75e6);
+        assert!(c.volts.iter().all(|v| *v == -1.25));
+        assert!(build_wave(&Shape::Sine(periodic(1000.0, 3.0, 3.0)), &RATES).is_err());
+        assert!(build_wave(&Shape::Const { volts: 6.0 }, &RATES).is_err());
+    }
+
+    #[test]
+    fn cli_parses() {
+        Cli::command().debug_assert();
+        let cli = Cli::try_parse_from([
+            "m2k", "gen", "-c", "1,2", "--for", "2s", "sine", "-f", "1k", "-a", "0.5", "-o", "-0.2",
+        ])
+        .unwrap();
+        let Cmd::Gen(g) = cli.cmd else { panic!() };
+        assert_eq!(g.channel, Outputs(vec![0, 1]));
+        let Shape::Sine(p) = g.shape else { panic!() };
+        assert_eq!((p.freq, p.amp, p.offset), (1000.0, 0.5, -0.2));
+        let cli = Cli::try_parse_from(["m2k", "gen", "const", "-1.5"]).unwrap();
+        let Cmd::Gen(g) = cli.cmd else { panic!() };
+        assert!(matches!(g.shape, Shape::Const { volts } if volts == -1.5));
+        assert!(Cli::try_parse_from(["m2k", "gen", "-c", "0", "off"]).is_err());
+        let cli = Cli::try_parse_from(["m2k", "psu", "set", "--neg", "-3.3"]).unwrap();
+        assert!(
+            matches!(cli.cmd, Cmd::Psu { cmd: Some(PsuCmd::Set { pos: None, neg: Some(v) }) } if v == -3.3)
+        );
+        let cli =
+            Cli::try_parse_from(["m2k", "scope", "-n", "100k", "-r", "10M", "--range2", "2.5"])
+                .unwrap();
+        let Cmd::Scope(s) = cli.cmd else { panic!() };
+        assert_eq!((s.samples, s.rate), (100_000, 10e6));
+    }
+}

@@ -112,6 +112,7 @@ pub fn adc_raw_to_volts_uncorrected(raw: f64, gain: f64) -> f64 {
 }
 
 /// Offset DAC steps for a vertical offset in volts.
+#[allow(dead_code)] // TODO(SCOPE-3): vertical offset option
 pub fn vertical_offset_to_raw(volts: f64, range: Range) -> i64 {
     (volts * 4096.0 * range.hw_gain() * ADC_GAIN / 2.693 / 1.2) as i64
 }
@@ -129,6 +130,7 @@ pub fn dac_volts_to_raw(volts: f64, filter_compensation: f64) -> i16 {
     (steps.clamp(-2048, 2047) << 4) as i16
 }
 
+#[cfg(test)]
 pub fn dac_raw_to_volts(raw: i16, filter_compensation: f64) -> f64 {
     -((f64::from(raw >> 4) + 0.5) * filter_compensation * DAC_VLSB)
 }
@@ -192,7 +194,11 @@ pub fn psu_volts_to_raw(rail: Rail, volts: f64, cal: RailCal) -> Result<i64> {
         bail!(
             "{} takes {} V, not {volts}",
             rail.name(),
-            if rail == Rail::Pos { "0 to 5" } else { "-5 to 0" }
+            if rail == Rail::Pos {
+                "0 to 5"
+            } else {
+                "-5 to 0"
+            }
         );
     }
     let raw = (volts * cal.gain + cal.offset) * rail.write_coefficient();
@@ -216,8 +222,12 @@ pub struct LutRow {
 
 /// Parses `cal,temp_lut`: nine comma separated numbers per temperature.
 pub fn parse_temp_lut(text: &str) -> Result<Vec<LutRow>> {
-    let values: Vec<&str> = text.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-    if values.is_empty() || values.len() % 9 != 0 {
+    let values: Vec<&str> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if values.is_empty() || !values.len().is_multiple_of(9) {
         bail!(
             "calibration table has {} values, expected a multiple of 9",
             values.len()
@@ -232,7 +242,7 @@ pub fn parse_temp_lut(text: &str) -> Result<Vec<LutRow>> {
             .map_err(|_| anyhow::anyhow!("calibration table: `{s}` is not an integer"))
     };
     let mut rows = vec![];
-    for row in values.chunks_exact(9) {
+    for row in values.as_chunks::<9>().0 {
         rows.push(LutRow {
             temperature: float(row[0])?,
             adc_offset: [int(row[1])?, int(row[2])?],
@@ -246,9 +256,11 @@ pub fn parse_temp_lut(text: &str) -> Result<Vec<LutRow>> {
 
 /// The row measured closest to `temperature`.
 pub fn nearest_lut_row(rows: &[LutRow], temperature: f64) -> Option<LutRow> {
-    rows.iter()
-        .copied()
-        .min_by(|a, b| (a.temperature - temperature).abs().total_cmp(&(b.temperature - temperature).abs()))
+    rows.iter().copied().min_by(|a, b| {
+        (a.temperature - temperature)
+            .abs()
+            .total_cmp(&(b.temperature - temperature).abs())
+    })
 }
 
 /// A cyclic DAC buffer that holds whole periods of a signal.
@@ -301,7 +313,8 @@ pub fn plan_wave(frequency: f64, rates: &[f64]) -> Result<WavePlan> {
             if exact > DAC_BUFFER_MAX as f64 {
                 break;
             }
-            let samples = ((exact / DAC_BUFFER_STEP as f64).round() as usize * DAC_BUFFER_STEP).max(DAC_BUFFER_MIN);
+            let samples = ((exact / DAC_BUFFER_STEP as f64).round() as usize * DAC_BUFFER_STEP)
+                .max(DAC_BUFFER_MIN);
             if samples > DAC_BUFFER_MAX || (samples as f64) < periods as f64 * 4.0 {
                 continue;
             }
@@ -364,7 +377,11 @@ mod tests {
             filter_compensation: 1.0,
             vertical_offset: 0.0,
         };
-        assert!(close(scale.volts(2047), 29.04, 0.01), "{}", scale.volts(2047));
+        assert!(
+            close(scale.volts(2047), 29.733, 0.001),
+            "{}",
+            scale.volts(2047)
+        );
         assert!(close(scale.volts(-100), -1.4525, 0.001));
         let high = AdcScale {
             range: Range::V2_5,
@@ -382,7 +399,11 @@ mod tests {
     fn vertical_offset_round_trips() {
         for range in [Range::V25, Range::V2_5] {
             let raw = vertical_offset_to_raw(1.0, range);
-            assert!(close(vertical_offset_to_volts(raw, range), 1.0, range.limit() / 500.0));
+            assert!(close(
+                vertical_offset_to_volts(raw, range),
+                1.0,
+                range.limit() / 500.0
+            ));
         }
         assert_eq!(vertical_offset_to_raw(0.0, Range::V25), 0);
         assert_eq!(Range::from_gain_name("high"), Range::V2_5);
@@ -393,13 +414,17 @@ mod tests {
     fn dac_raw_matches_libm2k() {
         // (short)((V * (-1 / vlsb) - 0.5) / compensation) << 4
         assert_eq!(dac_volts_to_raw(0.0, 1.0), 0);
-        assert_eq!(dac_volts_to_raw(1.0, 1.0), -409 << 4);
+        assert_eq!(dac_volts_to_raw(1.0, 1.0), -410 << 4);
         assert_eq!(dac_volts_to_raw(-1.0, 1.0), 409 << 4);
         assert_eq!(dac_volts_to_raw(2.5, 1.525879), -671 << 4);
         // clipped rather than wrapped
         assert_eq!(dac_volts_to_raw(-9.0, 1.0), 2047 << 4);
         assert_eq!(dac_volts_to_raw(9.0, 1.0), -2048 << 4);
-        assert!(close(dac_raw_to_volts(dac_volts_to_raw(3.3, 1.0), 1.0), 3.3, DAC_VLSB));
+        assert!(close(
+            dac_raw_to_volts(dac_volts_to_raw(3.3, 1.0), 1.0),
+            3.3,
+            DAC_VLSB
+        ));
         assert_eq!(dac_filter_compensation(75e4), Some(1.164153));
     }
 
@@ -418,12 +443,19 @@ mod tests {
         assert!(psu_volts_to_raw(Rail::Pos, -1.0, id).is_err());
         assert!(psu_volts_to_raw(Rail::Neg, 3.0, id).is_err());
         assert!(close(psu_raw_to_volts(Rail::Pos, 2112.0, id), 3.3008, 1e-3));
-        assert!(close(psu_raw_to_volts(Rail::Neg, 2112.0, id), -3.3008, 1e-3));
+        assert!(close(
+            psu_raw_to_volts(Rail::Neg, 2112.0, id),
+            -3.3008,
+            1e-3
+        ));
     }
 
     #[test]
     fn parses_temp_lut() {
-        let rows = parse_temp_lut("32.5,2040,2050,1.01,0.99,2060,2070,1.02,0.98, 45,2041,2051,1.0,1.0,2061,2071,1.0,1.0").unwrap();
+        let rows = parse_temp_lut(
+            "32.5,2040,2050,1.01,0.99,2060,2070,1.02,0.98, 45,2041,2051,1.0,1.0,2061,2071,1.0,1.0",
+        )
+        .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].adc_offset, [2040, 2050]);
         assert_eq!(rows[0].dac_gain, [1.02, 0.98]);

@@ -166,7 +166,11 @@ impl AdcSetup {
             };
             m.set(ADC_TRIGGER, mode, &self.trigger_modes[i])?;
         }
-        m.set(ADC, Attr::Device("sampling_frequency"), self.sample_rate as u64)?;
+        m.set(
+            ADC,
+            Attr::Device("sampling_frequency"),
+            self.sample_rate as u64,
+        )?;
         m.set(ADC, Attr::Device("oversampling_ratio"), self.oversampling)
     }
 }
@@ -270,7 +274,11 @@ fn measure_adc(m: &mut M2k, step: &mut dyn FnMut(&str)) -> Result<([i64; 2], [f6
 
 /// Calibrates the signal outputs against the scope inputs, which must be calibrated (`adc_gain` are their gain
 /// corrections). Drives W1 and W2 to about 2.5 V for a moment. On failure the previous corrections are put back.
-pub fn calibrate_dac(m: &mut M2k, adc_gain: [f64; 2], step: &mut dyn FnMut(&str)) -> Result<([i64; 2], [f64; 2])> {
+pub fn calibrate_dac(
+    m: &mut M2k,
+    adc_gain: [f64; 2],
+    step: &mut dyn FnMut(&str),
+) -> Result<([i64; 2], [f64; 2])> {
     let before = Corrections::read(m)?;
     let setup = AdcSetup::enter(m)?;
     let mut dac_rates = [0.0; 2];
@@ -306,14 +314,26 @@ pub fn calibrate_dac(m: &mut M2k, adc_gain: [f64; 2], step: &mut dyn FnMut(&str)
         m.set(OFFSET_DAC, offset_dac(i), offset[i])?;
         m.set(DACS[i], Attr::Device("calibscale"), gain[i])?;
         m.set(ADC, in_chn(i, "calibscale"), adc_gain[i])?;
-        m.set(DACS[i], Attr::Device("sampling_frequency"), dac_rates[i] as u64)?;
-        m.set(DACS[i], Attr::Device("oversampling_ratio"), dac_oversampling[i])?;
+        m.set(
+            DACS[i],
+            Attr::Device("sampling_frequency"),
+            dac_rates[i] as u64,
+        )?;
+        m.set(
+            DACS[i],
+            Attr::Device("oversampling_ratio"),
+            dac_oversampling[i],
+        )?;
     }
     setup.restore(m)?;
     result
 }
 
-fn measure_dac(m: &mut M2k, adc_gain: [f64; 2], step: &mut dyn FnMut(&str)) -> Result<([i64; 2], [f64; 2])> {
+fn measure_dac(
+    m: &mut M2k,
+    adc_gain: [f64; 2],
+    step: &mut dyn FnMut(&str),
+) -> Result<([i64; 2], [f64; 2])> {
     step("output offset: outputs at code 0");
     set_mode(m, "dac")?;
     for i in 0..2 {
@@ -359,7 +379,9 @@ pub fn reset(m: &mut M2k) -> Result<()> {
 /// board temperature and the row. Boards calibrated at the factory with firmware 0.26 or later have one.
 pub fn apply_lut(m: &mut M2k) -> Result<(f64, conv::LutRow)> {
     let Some(text) = m.ctx.attr("cal,temp_lut").map(str::to_string) else {
-        bail!("this M2K has no factory calibration table (no cal,temp_lut context attribute); use `m2k cal run`");
+        bail!(
+            "this M2K has no factory calibration table (no cal,temp_lut context attribute); use `m2k cal run`"
+        );
     };
     let rows = conv::parse_temp_lut(&text)?;
     let temperature = m.temperature()?;

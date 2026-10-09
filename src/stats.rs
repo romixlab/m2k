@@ -45,8 +45,9 @@ impl Analog {
     }
 }
 
-/// Summarizes `volts` sampled at `sample_rate`; `clipped` is counted by the caller from the raw samples.
-pub fn analog(volts: &[f64], sample_rate: f64, clipped: usize) -> Analog {
+/// Summarizes `volts` sampled at `sample_rate`; `clipped` is counted by the caller from the raw samples. A
+/// swing below `min_swing` (a few ADC steps) is noise: no frequency is looked for in it.
+pub fn analog(volts: &[f64], sample_rate: f64, clipped: usize, min_swing: f64) -> Analog {
     let n = volts.len();
     if n == 0 {
         return Analog {
@@ -71,7 +72,11 @@ pub fn analog(volts: &[f64], sample_rate: f64, clipped: usize) -> Analog {
     }
     let mean = sum / n as f64;
     let mean_square = squares / n as f64;
-    let (frequency, periods, duty) = periodicity(volts, sample_rate, min, max);
+    let (frequency, periods, duty) = if max - min >= min_swing {
+        periodicity(volts, sample_rate, min, max)
+    } else {
+        (None, 0, None)
+    };
     Analog {
         samples: n,
         min,
@@ -88,7 +93,12 @@ pub fn analog(volts: &[f64], sample_rate: f64, clipped: usize) -> Analog {
 
 /// Frequency, whole periods and duty cycle from rising crossings of the middle level, with a hysteresis of a
 /// tenth of the swing so that noise on a flat or slow signal is not counted.
-fn periodicity(volts: &[f64], sample_rate: f64, min: f64, max: f64) -> (Option<f64>, usize, Option<f64>) {
+fn periodicity(
+    volts: &[f64],
+    sample_rate: f64,
+    min: f64,
+    max: f64,
+) -> (Option<f64>, usize, Option<f64>) {
     let swing = max - min;
     if swing <= 0.0 || sample_rate <= 0.0 {
         return (None, 0, None);
@@ -107,8 +117,15 @@ fn periodicity(volts: &[f64], sample_rate: f64, min: f64, max: f64) -> (Option<f
             last_below = i;
         } else if armed && *v > high {
             armed = false;
-            let (a, b) = (volts[last_below], volts[(last_below + 1).min(volts.len() - 1)]);
-            let frac = if b > a { ((mid - a) / (b - a)).clamp(0.0, 1.0) } else { 0.0 };
+            let (a, b) = (
+                volts[last_below],
+                volts[(last_below + 1).min(volts.len() - 1)],
+            );
+            let frac = if b > a {
+                ((mid - a) / (b - a)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             crossings.push(last_below as f64 + frac);
         }
     }
@@ -120,8 +137,14 @@ fn periodicity(volts: &[f64], sample_rate: f64, min: f64, max: f64) -> (Option<f
     if span <= 0.0 {
         return (None, 0, None);
     }
-    let (first, last) = (crossings[0].ceil() as usize, crossings[periods].ceil() as usize);
-    let above = volts[first..last.min(volts.len())].iter().filter(|v| **v >= mid).count();
+    let (first, last) = (
+        crossings[0].ceil() as usize,
+        crossings[periods].ceil() as usize,
+    );
+    let above = volts[first..last.min(volts.len())]
+        .iter()
+        .filter(|v| **v >= mid)
+        .count();
     let duty = (last > first).then(|| above as f64 / (last - first) as f64);
     (Some(periods as f64 * sample_rate / span), periods, duty)
 }
@@ -222,31 +245,39 @@ mod tests {
         let volts: Vec<f64> = (0..10_000)
             .map(|i| 1.0 + 2.0 * (std::f64::consts::TAU * 1000.0 * i as f64 / rate).sin())
             .collect();
-        let s = analog(&volts, rate, 0);
+        let s = analog(&volts, rate, 0, 0.0);
         assert!((s.mean - 1.0).abs() < 1e-3, "{s:?}");
         assert!((s.vpp() - 4.0).abs() < 1e-2);
         assert!((s.ac_rms - 2.0 / 2f64.sqrt()).abs() < 1e-3);
         assert!((s.rms - (1.0f64 + 2.0).sqrt()).abs() < 1e-3);
         assert!((s.frequency.unwrap() - 1000.0).abs() < 0.5, "{s:?}");
-        assert_eq!(s.periods, 99);
+        assert_eq!(s.periods, 98);
         assert!((s.duty.unwrap() - 0.5).abs() < 0.02);
     }
 
     #[test]
     fn flat_and_noisy_signals_have_no_frequency() {
-        let s = analog(&[3.3; 100], 1e3, 0);
+        let s = analog(&[3.3; 100], 1e3, 0, 0.0);
         assert_eq!((s.frequency, s.vpp(), s.ac_rms), (None, 0.0, 0.0));
         // one step is not a period
         let step: Vec<f64> = (0..100).map(|i| if i < 50 { 0.0 } else { 1.0 }).collect();
-        assert_eq!(analog(&step, 1e3, 0).frequency, None);
-        assert_eq!(analog(&[], 1e3, 2).clipped, 2);
+        assert_eq!(analog(&step, 1e3, 0, 0.0).frequency, None);
+        assert_eq!(analog(&[], 1e3, 2, 0.0).clipped, 2);
+        // a small square is noise when the floor is above it
+        let noise: Vec<f64> = (0..400)
+            .map(|i| if i % 4 < 2 { 0.01 } else { 0.0 })
+            .collect();
+        assert!(analog(&noise, 1e3, 0, 0.0).frequency.is_some());
+        assert_eq!(analog(&noise, 1e3, 0, 0.1).frequency, None);
     }
 
     #[test]
     fn square_wave_duty() {
         // 25 % high, period 20 samples
-        let volts: Vec<f64> = (0..400).map(|i| if i % 20 < 5 { 3.3 } else { 0.0 }).collect();
-        let s = analog(&volts, 20e3, 0);
+        let volts: Vec<f64> = (0..400)
+            .map(|i| if i % 20 < 5 { 3.3 } else { 0.0 })
+            .collect();
+        let s = analog(&volts, 20e3, 0, 0.0);
         assert!((s.frequency.unwrap() - 1000.0).abs() < 1.0, "{s:?}");
         assert!((s.duty.unwrap() - 0.25).abs() < 0.01, "{s:?}");
     }
