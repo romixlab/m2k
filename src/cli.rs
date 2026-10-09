@@ -1259,18 +1259,39 @@ fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
     Ok(())
 }
 
-/// A Value Change Dump sigrok and other waveform viewers can import: one wire per pin, picosecond
-/// timescale (exact for the native rates; rounded to the nearest ps otherwise), only the samples where a
-/// reported pin changed.
+/// The VCD timescale for a sample period in ps, and how many timescale ticks one sample takes. sigrok reads
+/// the timescale as its sample period, so it is one sample (`1 us` at 1 MS/s, `10 ns` at 100 MS/s) when the
+/// period is 1, 10 or 100 of a unit; otherwise 1 ps with the period in ticks.
+fn vcd_timescale(ps_per_sample: u64) -> (String, u64) {
+    const UNITS: [(u64, &str); 5] = [
+        (1_000_000_000_000, "s"),
+        (1_000_000_000, "ms"),
+        (1_000_000, "us"),
+        (1_000, "ns"),
+        (1, "ps"),
+    ];
+    for (unit_ps, unit) in UNITS {
+        for mult in [100, 10, 1] {
+            if ps_per_sample == mult * unit_ps {
+                return (format!("{mult} {unit}"), 1);
+            }
+        }
+    }
+    ("1 ps".into(), ps_per_sample)
+}
+
+/// A Value Change Dump sigrok and other waveform viewers can import: one wire per pin, timescale from
+/// [`vcd_timescale`], only the samples where a reported pin changed, and a last timestamp at the end of the
+/// capture so its full length survives.
 fn write_vcd(path: &Path, pins: &[u32], words: &[u16], rate: f64) -> Result<()> {
-    let ps_per_sample = (1e12 / rate).round().max(1.0) as u64;
+    let (timescale, ticks_per_sample) = vcd_timescale((1e12 / rate).round().max(1.0) as u64);
     let symbols: Vec<char> = (b'!'..=b'~')
         .map(|b| b as char)
         .filter(|c| *c != '$' && !c.is_ascii_digit())
         .take(pins.len())
         .collect();
     let mut s = String::new();
-    s += "$timescale 1 ps $end\n$scope module m2k $end\n";
+    s += &format!("$timescale {timescale} $end\n$scope module m2k $end\n");
     for (sym, p) in symbols.iter().zip(pins) {
         s += &format!("$var wire 1 {sym} dio{p} $end\n");
     }
@@ -1280,7 +1301,7 @@ fn write_vcd(path: &Path, pins: &[u32], words: &[u16], rate: f64) -> Result<()> 
         if last == Some(*w) {
             continue;
         }
-        s += &format!("#{}\n", k as u64 * ps_per_sample);
+        s += &format!("#{}\n", k as u64 * ticks_per_sample);
         if k == 0 {
             s += "$dumpvars\n";
         }
@@ -1295,6 +1316,7 @@ fn write_vcd(path: &Path, pins: &[u32], words: &[u16], rate: f64) -> Result<()> 
         }
         last = Some(*w);
     }
+    s += &format!("#{}\n", words.len() as u64 * ticks_per_sample);
     write_file(path, s.as_bytes())
 }
 
@@ -1689,13 +1711,26 @@ mod tests {
         write_vcd(&path, &[0, 1], &[0b00, 0b01, 0b01, 0b11], 1e6).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
-        assert!(text.contains("$timescale 1 ps $end"));
+        // one tick per sample at 1 MS/s, so sigrok reads 1 MHz as the sample rate
+        assert!(text.contains("$timescale 1 us $end"));
         assert!(text.contains("$var wire 1 ! dio0 $end"));
         assert!(text.contains("$var wire 1 \" dio1 $end"));
         assert!(text.contains("#0\n$dumpvars\n0!\n0\"\n$end\n"));
-        // sample 1 (t=1e6 ps) changes dio0 to 1; sample 2 repeats, so no entry; sample 3 changes dio1 too
-        assert!(text.contains("#1000000\n1!\n"));
-        assert!(!text.contains("#2000000"));
-        assert!(text.contains("#3000000\n1\"\n"));
+        // sample 1 changes dio0 to 1; sample 2 repeats, so no entry; sample 3 changes dio1 too
+        assert!(text.contains("#1\n1!\n"));
+        assert!(!text.contains("#2\n"));
+        assert!(text.contains("#3\n1\"\n"));
+        // the capture ends after 4 samples
+        assert!(text.ends_with("#4\n"));
+    }
+
+    #[test]
+    fn vcd_timescales() {
+        assert_eq!(vcd_timescale(1_000_000), ("1 us".into(), 1));
+        assert_eq!(vcd_timescale(10_000), ("10 ns".into(), 1));
+        assert_eq!(vcd_timescale(100_000_000), ("100 us".into(), 1));
+        assert_eq!(vcd_timescale(1_000_000_000), ("1 ms".into(), 1));
+        // 3 MS/s: 333333 ps, no round unit
+        assert_eq!(vcd_timescale(333_333), ("1 ps".into(), 333_333));
     }
 }

@@ -2,7 +2,7 @@
 members = ["crates/iiod_client"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 
 [package]
 name = "m2k_cli"
@@ -26,7 +26,7 @@ anyhow = "1"
 clap = { version = "4.6", features = ["derive", "env"] }
 clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
 ctrlc = { version = "3.5", features = ["termination"] }
-iiod_client = { path = "crates/iiod_client", version = "0.3.0" }
+iiod_client = { path = "crates/iiod_client", version = "0.3.1" }
 indicatif = "0.18"
 serde_json = "1"
 

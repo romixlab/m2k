@@ -6,8 +6,12 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-09
+
 ### Fixed
 
+- `--vcd` writes the timescale as one sample period (`1 us` at 1 MS/s, `10 ns` at 100 MS/s) and a last
+  timestamp at the end of the capture: sigrok took the old `1 ps` as a 1 THz sample rate (LOGIC-5).
 - Builds again after the 0.3.0 release: both crates take their version from `[workspace.package]`
   (`version.workspace = true`), so a release bumps them together.
 
