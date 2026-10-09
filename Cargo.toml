@@ -1,0 +1,30 @@
+[workspace]
+members = ["crates/iiod_client"]
+
+[package]
+name = "m2k_cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI and agent skill for the Analog Devices ADALM2000 (M2K) over a pure-Rust iiod client"
+authors = ["Roman Isaikin <roman@vhrd.tech>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/romixlab/m2k_cli"
+readme = "README.md"
+keywords = ["adalm2000", "m2k", "iio", "oscilloscope", "cli"]
+categories = ["command-line-utilities", "hardware-support", "development-tools::debugging"]
+rust-version = "1.88"
+
+[[bin]]
+name = "m2k"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive", "env"] }
+clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
+ctrlc = { version = "3.5", features = ["termination"] }
+iiod_client = { path = "crates/iiod_client", version = "0.1.0" }
+indicatif = "0.18"
+serde_json = "1"
+
+[dev-dependencies]

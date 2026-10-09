@@ -1,0 +1,14 @@
+[package]
+name = "iiod_client"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust client for the iiod network protocol of Linux IIO devices (ADALM2000, ADALM-Pluto, ...), no libiio"
+authors = ["Roman Isaikin <roman@vhrd.tech>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/romixlab/m2k_cli"
+keywords = ["iio", "iiod", "libiio", "adalm2000", "pluto"]
+categories = ["hardware-support", "network-programming"]
+rust-version = "1.88"
+
+[dependencies]
+roxmltree = "0.21"
