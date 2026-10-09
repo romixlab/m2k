@@ -1,6 +1,6 @@
 [package]
 name = "iiod_client"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2024"
 description = "Pure-Rust client for the iiod network protocol of Linux IIO devices (ADALM2000, ADALM-Pluto, ...), no libiio"
 authors = ["Roman Isaikin <roman@vhrd.tech>"]

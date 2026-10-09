@@ -6,6 +6,13 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-09
+
+### Fixed
+
+- Builds again: `iiod_client` carries the workspace version (the 0.2.0 release bumped only the requirement on
+  it), and LICENSE-APACHE names the right copyright holder.
+
 ## [0.2.0] - 2026-10-09
 
 ### Added
