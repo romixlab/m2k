@@ -14,8 +14,8 @@ This file is the single source of truth for what m2k_cli does, what is broken an
 - When finishing work, update the item in the same commit. Obsolete items go to *Dropped and superseded*.
 
 Real-device checks so far: one ADALM2000 Rev.D, firmware v0.27 (iiod 0.21), over its USB network, with W1 wired
-to 1+, W2 to 2+, 1-/2- to GND, nothing on the digital pins or supplies (9 Oct 2026). Emulator: iio-emu 0.2.0
-`adalm2000` profile (Rev.C, firmware v0.26).
+to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies (9 Oct 2026). Emulator: iio-emu
+0.2.0 `adalm2000` profile (Rev.C, firmware v0.26).
 
 ## iiod client (`IIO`, crate `crates/iiod_client`)
 
@@ -92,19 +92,21 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing on the digital pins or supplies (9 Oct 20
 - 🧪 **LOGIC-1 logic**: free-running capture of DIO0-15 (`-n`, `-r`, `-p`), per pin low/high/toggling, edges,
   frequency, share high, shortest pulse, pin direction; `--csv`. Runs on the real M2K (open pins read high) and
   the emulator (pins read low); not yet checked with a real signal on a pin.
-- 🧪 **LOGIC-2 Digital outputs**: `m2k digital out FILE.csv -r RATE`: a pattern from a CSV sample buffer
+- ✅ **LOGIC-2 Digital outputs**: `m2k digital out FILE.csv -r RATE`: a pattern from a CSV sample buffer
   (`dioN` columns, the format `logic --csv` writes), per-pin push-pull or open-drain (`--open-drain`), cyclic or
   one-shot (`--cyclic`/`--for`, else plays once); pins switch to `out` while running and back to `in` (tri-state)
-  on stop, Ctrl+C or error. Verified on the emulator (attribute round-trip, buffer accepted); real M2K: see
-  the self-loopback check below.
-- 🧪 **LOGIC-3 Trigger**: `logic --trigger PIN:COND` (repeatable; none/any/rising/falling/low/high),
+  on stop, Ctrl+C or error. Verified on the real M2K: DIO0 driven push-pull and open-drain, `direction`/
+  `outputmode` round-trip, pin tri-states again after a one-shot buffer (`tests/device.rs::digital_self_loopback`,
+  9 Oct 2026); on the emulator: attribute round-trip, buffer accept/reject.
+- ✅ **LOGIC-3 Trigger**: `logic --trigger PIN:COND` (repeatable; none/any/rising/falling/low/high),
   `--trigger-and` (AND instead of OR across pins), `--trigger-delay` (negative = pretrigger samples kept,
   positive = delay after the event), `--trigger-wait` (extra time to wait for it). Attribute names and the
   divider-based `trigger_delay` sign convention are from the kernel driver
   (`drivers/iio/logic/m2k-logic-analyzer.c`), not libm2k. The emulator does not model digital inputs or
-  triggers (AGENTS.md), so this can only be exercised attribute-round-trip there; real M2K: a `digital out`
-  pattern on a pin looped back to the same pin's `logic` capture (DIO out and in read the same physical line),
-  since no external wiring is free on the shared bench right now.
+  triggers (AGENTS.md), so there it only exercises the attributes; verified on the real M2K: a `digital out`
+  pattern on DIO0 (push-pull and open-drain) read back by `logic` on the same physical pin, including a
+  rising-edge trigger firing at `sample_index` 0 as predicted, with no external wiring needed
+  (`tests/device.rs::digital_self_loopback`, 9 Oct 2026).
 - 💡 **LOGIC-4 Protocol decode**: UART/SPI/I2C summaries like saleae_cli's, from a capture.
 - 🧪 **LOGIC-5 VCD export**: `logic --vcd FILE.vcd` alongside `--csv`: one wire per reported pin, `dioN` names,
   picosecond timescale, only the samples where a reported pin changed (`$dumpvars` for the initial state).

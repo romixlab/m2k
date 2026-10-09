@@ -113,5 +113,6 @@ offer the CSV path for a closer look.
   `m2k digital out` leaves its pins driving the last sample: `m2k attr m2k-logic-analyzer -c voltageN direction in`
   per pin tri-states it again.
 - Verified on a real M2K (Rev.D, firmware 0.27): info, attr, psu (on its own monitor), dmm, voltmeter, scope
-  and gen through a loopback, cal run/status/reset, logic with open pins. Not yet verified: logic with real
-  signals on the pins, `cal lut` (no board at hand had a factory table), supplies against an external meter.
+  and gen through a loopback, cal run/status/reset, logic with open pins, `digital out` and `logic --trigger`
+  self-contained on DIO0 (push-pull and open-drain, trigger firing where predicted). Not yet verified: `cal lut`
+  (no board at hand had a factory table), supplies against an external meter, VCD against sigrok-cli.
