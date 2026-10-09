@@ -6,6 +6,8 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-09
+
 ### Added
 
 - `justfile` with the recipes every work repo has: `just test`, `just lint` (fmt check, clippy), `just install`,
