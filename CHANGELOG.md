@@ -6,6 +6,11 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+### Added
+
+- `justfile` with the recipes every work repo has: `just test`, `just lint` (fmt check, clippy), `just install`,
+  `just deploy` (this PC up to main, then install).
+
 ### Fixed
 
 - `logic --trigger-delay` below -8192 fails before touching the device with a message naming the limit (the M2K
