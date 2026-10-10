@@ -6,6 +6,8 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-10
+
 ### Changed
 
 - The repo is github.com/romixlab/m2k (was m2k_cli): the plain name for the repo and the library, `m2k_cli` for
