@@ -70,7 +70,7 @@ wait
 ```
 
 Sample rates: native 1k, 10k, 100k, 1M, 10M, 100M S/s; others are made by averaging (the warning says what you
-got). A capture holds up to 8M samples per channel. Sine frequencies are exact when the output rate divides
+got). A scope capture holds up to 4194304 samples per channel (`logic`: 8M). Sine frequencies are exact when the output rate divides
 into whole periods; the `gen` line prints the real frequency.
 
 `logic` and `digital out` share one clock divided from 100 MS/s across all 16 pins: asking for fewer pins

@@ -155,7 +155,7 @@ impl From<RangeArg> for Range {
 
 #[derive(Args, Debug)]
 struct ScopeArgs {
-    /// Samples per channel (10k, 1M; at most 8M).
+    /// Samples per channel (10k, 1M; at most 4M = 4194304).
     #[arg(short = 'n', long, default_value = "10k", value_parser = parse::count)]
     samples: usize,
     /// Sample rate (1k to 100M); rates between the native 1k/10k/.../100M are made by averaging.

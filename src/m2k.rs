@@ -28,6 +28,9 @@ pub const LOGIC_TX: &str = "m2k-logic-analyzer-tx";
 /// Samples in one capture: buffers hold a multiple of 4 samples, and the device has 512 MB for everything.
 pub const BUFFER_STEP: usize = 4;
 pub const MAX_SAMPLES: usize = 8_000_000;
+/// Most samples per channel in one scope capture: both channels share one 16 MiB buffer (2 x 16 bits x 4 Mi);
+/// one more and the driver answers EFBIG (found on the device, 10 Oct 2026)
+pub const MAX_SCOPE_SAMPLES: usize = 4 * 1024 * 1024;
 /// Most samples the logic analyzer keeps from before its trigger (`trigger_delay` down to -8192; the driver
 /// answers EINVAL below that, at every sample rate).
 pub const LOGIC_MAX_PRETRIGGER: i32 = 8192;
@@ -322,8 +325,8 @@ impl M2k {
 
     /// Opens the scope buffer for repeated captures of `samples` samples; see [`AdcBuffer::read`].
     pub fn adc_open(&mut self, samples: usize) -> Result<AdcBuffer> {
-        if samples == 0 || samples > MAX_SAMPLES {
-            bail!("a capture takes 1 to {MAX_SAMPLES} samples, not {samples}");
+        if samples == 0 || samples > MAX_SCOPE_SAMPLES {
+            bail!("a scope capture takes 1 to {MAX_SCOPE_SAMPLES} samples per channel, not {samples}");
         }
         let dev = self.device(ADC)?.clone();
         let mask = dev.mask_of(&dev.channels);

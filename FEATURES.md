@@ -64,7 +64,8 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
 
 ## Scope (`SCOPE`)
 
-- ✅ **SCOPE-1 scope**: free-running capture of both channels, `-n` (up to 8M), `-r` (native 1k..100M, other rates
+- ✅ **SCOPE-1 scope**: free-running capture of both channels, `-n` (up to 4 Mi = 4194304 per channel: the two channels share a 16 MiB
+  buffer, one more sample and the driver answers EFBIG; was given as 8M until 10 Oct 2026), `-r` (native 1k..100M, other rates
   by the ADC's oversampling), `--range`/`--range1`/`--range2`, stats per channel (mean, min, max, vpp, rms, AC
   rms, frequency and duty from mid-level crossings with hysteresis and a 10-LSB noise floor, clipping count),
   warnings when uncalibrated or clipped, `--csv`. Volts with libm2k's formula (range gain, filter compensation,

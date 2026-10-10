@@ -146,7 +146,8 @@ impl AdcSetup {
         let saved = AdcSetup {
             trigger_modes: [m.get(ADC_TRIGGER, mode(0))?, m.get(ADC_TRIGGER, mode(1))?],
             sample_rate: m.get_f64(ADC, Attr::Device("sampling_frequency"))?,
-            oversampling: m.get_i64(ADC, Attr::Device("oversampling_ratio"))?,
+            // reads 0 after power-up, which the driver refuses to take back (EINVAL)
+            oversampling: m.get_i64(ADC, Attr::Device("oversampling_ratio"))?.max(1),
         };
         for i in 0..2 {
             m.set(ADC_TRIGGER, mode(i), "always")?;
@@ -285,7 +286,7 @@ pub fn calibrate_dac(
     let mut dac_oversampling = [1; 2];
     for i in 0..2 {
         dac_rates[i] = m.get_f64(DACS[i], Attr::Device("sampling_frequency"))?;
-        dac_oversampling[i] = m.get_i64(DACS[i], Attr::Device("oversampling_ratio"))?;
+        dac_oversampling[i] = m.get_i64(DACS[i], Attr::Device("oversampling_ratio"))?.max(1);
         m.set(DACS[i], Attr::Device("calibscale"), 1.0)?;
     }
     let measured = measure_dac(m, adc_gain, step);

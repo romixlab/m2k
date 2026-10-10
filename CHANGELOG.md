@@ -6,6 +6,13 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+### Fixed
+
+- `cal run` failed right after the M2K's power-up (`write iio:device0 oversampling_ratio = 0: EINVAL`): the saved
+  oversampling ratio reads 0 then and is now put back as at least 1 (CAL-1).
+- `scope -n` takes at most 4194304 samples per channel, the device's real limit, with a clear error above it;
+  `-n 8M` (the old stated maximum) ended in `read buffer ... errno -27` (EFBIG) (SCOPE-1).
+
 ## [0.4.0] - 2026-10-09
 
 ### Added
