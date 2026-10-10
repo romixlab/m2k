@@ -6,6 +6,8 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-10
+
 ### Fixed
 
 - `cal run` failed right after the M2K's power-up (`write iio:device0 oversampling_ratio = 0: EINVAL`): the saved
