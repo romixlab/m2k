@@ -1,4 +1,4 @@
-# m2k_cli: the ADALM2000 library, CLI and Python module, and the iiod client.
+# m2k: the ADALM2000 library, CLI and Python module, and the iiod client.
 
 py_venv := "/tmp/m2k_py-venv"
 
@@ -25,5 +25,5 @@ install:
 
 # Bring this PC up to main
 deploy:
-    tpm repos pull m2k_cli
+    tpm repos pull m2k
     just install

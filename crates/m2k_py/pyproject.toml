@@ -15,7 +15,7 @@ classifiers = [
 dynamic = ["version"]
 
 [project.urls]
-Repository = "https://github.com/romixlab/m2k_cli"
+Repository = "https://github.com/romixlab/m2k"
 
 [dependency-groups]
 dev = ["pytest>=8"]

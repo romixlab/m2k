@@ -7,7 +7,7 @@ version = "0.5.0"
 edition = "2024"
 authors = ["Roman Isaikin <roman@vhrd.tech>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/romixlab/m2k_cli"
+repository = "https://github.com/romixlab/m2k"
 rust-version = "1.88"
 
 [workspace.dependencies]

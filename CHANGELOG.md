@@ -6,6 +6,11 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+### Changed
+
+- The repo is github.com/romixlab/m2k (was m2k_cli): the plain name for the repo and the library, `m2k_cli` for
+  the binary crate.
+
 ## [0.5.0] - 2026-10-10
 
 ### Added

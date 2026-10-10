@@ -1,4 +1,4 @@
-# m2k_cli
+# m2k
 
 `m2k`: a Rust library, CLI and agent skill, and a Python module, for the Analog Devices ADALM2000 (M2K):
 scope, signal generator, power supplies, voltmeter, logic analyzer and calibration, over the network with a
@@ -30,5 +30,5 @@ The M2K shows up as a USB network adapter; `m2k` talks to iiod at `192.168.2.1:3
 - [`crates/iiod_client`](crates/iiod_client): the iiod client on its own, for any IIO device (ADALM-Pluto, ...).
 
 The conversions and the calibration procedure follow ADI's [libm2k](https://github.com/analogdevicesinc/libm2k);
-the protocol follows libiio's iiod. m2k_cli is licensed under MIT or Apache-2.0, at your option
+the protocol follows libiio's iiod. m2k is licensed under MIT or Apache-2.0, at your option
 ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)).

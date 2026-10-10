@@ -1,6 +1,6 @@
-# m2k_cli features and roadmap
+# m2k features and roadmap
 
-This file is the single source of truth for what m2k_cli does, what is broken and what is planned.
+This file is the single source of truth for what m2k does, what is broken and what is planned.
 [CHANGELOG.md](CHANGELOG.md) records what changed and when; this file records the current state.
 
 ## How to use this file

@@ -1,8 +1,8 @@
-# Working on m2k_cli
+# Working on m2k
 
 Guidance for AI agents and contributors. Read this before changing code.
 
-m2k_cli is the Cargo workspace for the Analog Devices ADALM2000 (M2K): scope, signal generator, power
+The m2k repo is the Cargo workspace for the Analog Devices ADALM2000 (M2K): scope, signal generator, power
 supplies, voltmeter, logic analyzer and calibration, library first (tpm CLAUDE.md "Code repos": tools are a
 library first) — the `m2k` Rust library (`crates/m2k`), its thin CLI and agent skill on top
 (`crates/m2k_cli`, binary `m2k`), and a Python module for notebooks and test benches (`crates/m2k_py`). It
