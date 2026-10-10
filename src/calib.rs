@@ -286,7 +286,9 @@ pub fn calibrate_dac(
     let mut dac_oversampling = [1; 2];
     for i in 0..2 {
         dac_rates[i] = m.get_f64(DACS[i], Attr::Device("sampling_frequency"))?;
-        dac_oversampling[i] = m.get_i64(DACS[i], Attr::Device("oversampling_ratio"))?.max(1);
+        dac_oversampling[i] = m
+            .get_i64(DACS[i], Attr::Device("oversampling_ratio"))?
+            .max(1);
         m.set(DACS[i], Attr::Device("calibscale"), 1.0)?;
     }
     let measured = measure_dac(m, adc_gain, step);

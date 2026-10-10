@@ -326,7 +326,9 @@ impl M2k {
     /// Opens the scope buffer for repeated captures of `samples` samples; see [`AdcBuffer::read`].
     pub fn adc_open(&mut self, samples: usize) -> Result<AdcBuffer> {
         if samples == 0 || samples > MAX_SCOPE_SAMPLES {
-            bail!("a scope capture takes 1 to {MAX_SCOPE_SAMPLES} samples per channel, not {samples}");
+            bail!(
+                "a scope capture takes 1 to {MAX_SCOPE_SAMPLES} samples per channel, not {samples}"
+            );
         }
         let dev = self.device(ADC)?.clone();
         let mask = dev.mask_of(&dev.channels);
