@@ -6,6 +6,8 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-10
+
 ### Added
 
 - `m2k` library crate (`crates/m2k`): the typed API behind every CLI command (device, conversions,

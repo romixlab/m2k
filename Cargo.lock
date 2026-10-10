@@ -222,7 +222,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "iiod_client"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "roxmltree",
 ]
@@ -280,7 +280,7 @@ checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "m2k"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "iiod_client",
  "thiserror",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "m2k_cli"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "m2k_py"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "m2k",
  "pyo3",
