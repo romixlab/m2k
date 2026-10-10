@@ -1,7 +1,7 @@
 //! Raw values to volts and back, with the constants and formulas of ADI's libm2k (`m2kanalogin_impl.cpp`,
 //! `m2kanalogout_impl.cpp`, `m2kpowersupply_impl.cpp`, `m2kcalibration_impl.cpp`). Pure functions, no device.
 
-use anyhow::{Result, bail};
+use crate::error::{Result, bail, err};
 
 /// Scope input range, set by the gain of the input stage (`m2k-fabric` `gain`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -235,11 +235,11 @@ pub fn parse_temp_lut(text: &str) -> Result<Vec<LutRow>> {
     }
     let float = |s: &str| -> Result<f64> {
         s.parse()
-            .map_err(|_| anyhow::anyhow!("calibration table: `{s}` is not a number"))
+            .map_err(|_| err!("calibration table: `{s}` is not a number"))
     };
     let int = |s: &str| -> Result<i64> {
         s.parse()
-            .map_err(|_| anyhow::anyhow!("calibration table: `{s}` is not an integer"))
+            .map_err(|_| err!("calibration table: `{s}` is not an integer"))
     };
     let mut rows = vec![];
     for row in values.as_chunks::<9>().0 {

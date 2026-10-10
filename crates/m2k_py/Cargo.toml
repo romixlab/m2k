@@ -1,0 +1,18 @@
+[package]
+name = "m2k_py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Python module for the Analog Devices ADALM2000 (M2K)"
+publish = false # distributed as a Python wheel, see pyproject.toml
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# renamed: the extension module's `#[pymodule] fn m2k` would otherwise shadow the `m2k` crate name
+m2k_lib = { package = "m2k", path = "../m2k", version = "0.4.1" }
+pyo3.workspace = true

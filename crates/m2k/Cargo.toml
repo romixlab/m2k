@@ -1,0 +1,16 @@
+[package]
+name = "m2k"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Typed library for the Analog Devices ADALM2000 (M2K) over a pure-Rust iiod client: scope, signal generator, power supplies, voltmeter, logic analyzer, calibration"
+readme = "../../README.md"
+keywords = ["adalm2000", "m2k", "iio", "oscilloscope", "instrument"]
+categories = ["hardware-support", "science"]
+
+[dependencies]
+iiod_client.workspace = true
+thiserror.workspace = true

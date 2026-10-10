@@ -7,10 +7,9 @@
 //! - Output offset and gain: outputs looped to the inputs (`dac`), measured at code 0 and at code 1024.
 
 use crate::conv::{self, DEFAULT_OFFSET};
-use crate::m2k::{ADC, ADC_TRIGGER, DACS, FABRIC, M2k, OFFSET_DAC};
-use anyhow::{Result, bail};
+use crate::device::{ADC, ADC_TRIGGER, DACS, FABRIC, M2k, OFFSET_DAC};
+use crate::error::{Result, bail};
 use iiod_client::Attr;
-use serde_json::{Value, json};
 use std::time::Duration;
 
 const OFFSET_SAMPLES: usize = 100_000;
@@ -82,16 +81,6 @@ impl Corrections {
                 || self.dac_offset[i] != DEFAULT_OFFSET
                 || self.adc_gain[i] != 1.0
                 || self.dac_gain[i] != 1.0
-        })
-    }
-
-    pub fn json(&self) -> Value {
-        json!({
-            "calibrated": self.calibrated(),
-            "adc_offset": self.adc_offset,
-            "adc_gain": self.adc_gain,
-            "dac_offset": self.dac_offset,
-            "dac_gain": self.dac_gain,
         })
     }
 
@@ -400,6 +389,15 @@ pub fn apply_lut(m: &mut M2k) -> Result<(f64, conv::LutRow)> {
     Ok((temperature, row))
 }
 
+/// Self-calibrates the scope, and the outputs too unless `adc_only`, then reads the corrections back.
+pub fn run(m: &mut M2k, adc_only: bool, step: &mut dyn FnMut(&str)) -> Result<Corrections> {
+    let (_, adc_gain) = calibrate_adc(m, step)?;
+    if !adc_only {
+        calibrate_dac(m, adc_gain, step)?;
+    }
+    Corrections::read(m)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,7 +411,6 @@ mod tests {
             dac_gain: [1.0; 2],
         };
         assert!(!c.calibrated());
-        assert_eq!(c.json()["adc_offset"], json!([2048, null]));
         c.dac_gain[1] = 0.98;
         assert!(c.calibrated());
         assert!(c.text().contains("offset 2048 / unknown"), "{}", c.text());

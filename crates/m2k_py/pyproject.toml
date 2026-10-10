@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.11,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "m2k"
+description = "Drive an Analog Devices ADALM2000 (M2K) over the network: scope, signal generator, power supplies, voltmeter, logic analyzer, calibration"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: OS Independent",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/romixlab/m2k_cli"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.maturin]
+module-name = "m2k"
+
+[tool.uv]
+# Rebuild the package when any rust files change
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "**/*.rs" }, { file = "../m2k/**/*.rs" }]

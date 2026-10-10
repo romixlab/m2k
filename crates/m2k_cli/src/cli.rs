@@ -1,14 +1,16 @@
-//! The command tree (clap derive) and the command handlers; `--json` output goes through [`Out::print`].
+//! The command tree (clap derive) and the command handlers; `--json` output goes through [`Out::print`]. The
+//! M2K's devices and the typed calls behind each command (capture, calibration, ...) live in the `m2k` crate;
+//! this module parses arguments, calls into it, and formats text/JSON/CSV/VCD.
 
-use crate::calib::{self, Corrections};
-use crate::conv::{self, Rail, Range};
-use crate::m2k::{self, LogicTrigger, M2k, TriggerCondition};
-use crate::{complete, parse, stats};
+use crate::{complete, parse};
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::ArgValueCandidates;
 use iiod_client::Attr;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use m2k::cal::{self, Corrections};
+use m2k::conv::{Rail, Range};
+use m2k::{LogicTrigger, M2k, TriggerCondition, device, dmm, logic, psu, scope, stats, wave};
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
@@ -238,6 +240,30 @@ struct Periodic {
     duty: f64,
 }
 
+impl Periodic {
+    fn to_lib(&self) -> wave::Periodic {
+        wave::Periodic {
+            freq: self.freq,
+            amp: self.amp,
+            offset: self.offset,
+            phase: self.phase,
+            duty: self.duty,
+        }
+    }
+}
+
+/// `None` for `Off`, which is not a wave (the caller switches the output off instead).
+fn to_lib_shape(shape: &Shape) -> Option<wave::Shape> {
+    Some(match shape {
+        Shape::Const { volts } => wave::Shape::Const(*volts),
+        Shape::Off => return None,
+        Shape::Sine(p) => wave::Shape::Sine(p.to_lib()),
+        Shape::Square(p) => wave::Shape::Square(p.to_lib()),
+        Shape::Triangle(p) => wave::Shape::Triangle(p.to_lib()),
+        Shape::Sawtooth(p) => wave::Shape::Sawtooth(p.to_lib()),
+    })
+}
+
 #[derive(Args, Debug)]
 struct LogicArgs {
     /// Samples (10k, 1M; at most 8M).
@@ -440,7 +466,7 @@ pub fn main() {
 
 fn run(cli: Cli) -> Result<()> {
     let out = Out { json: cli.json };
-    let connect = || M2k::connect(&cli.uri, cli.timeout);
+    let connect = || -> Result<M2k> { Ok(M2k::connect(&cli.uri, cli.timeout)?) };
     match cli.cmd {
         Cmd::Info { devices } => info(&out, &mut connect()?, devices),
         Cmd::Attr(args) => attr(&out, &mut connect()?, args),
@@ -451,11 +477,11 @@ fn run(cli: Cli) -> Result<()> {
         ),
         Cmd::Dmm { filter } => dmm(&out, &mut connect()?, &filter),
         Cmd::Voltmeter { range } => voltmeter(&out, &mut m2k_connect(connect)?, range.into()),
-        Cmd::Scope(args) => scope(&out, &mut m2k_connect(connect)?, args),
+        Cmd::Scope(args) => scope_cmd(&out, &mut m2k_connect(connect)?, args),
         Cmd::Gen(args) => gen_cmd(&out, &mut m2k_connect(connect)?, args),
-        Cmd::Logic(args) => logic(&out, &mut m2k_connect(connect)?, args),
+        Cmd::Logic(args) => logic_cmd(&out, &mut m2k_connect(connect)?, args),
         Cmd::Digital { cmd } => digital(&out, &mut m2k_connect(connect)?, cmd),
-        Cmd::Cal { cmd } => cal(
+        Cmd::Cal { cmd } => cal_cmd(
             &out,
             &mut m2k_connect(connect)?,
             cmd.unwrap_or(CalCmd::Status),
@@ -476,6 +502,47 @@ fn on_off(on: bool) -> String {
     } else {
         style::dim("off")
     }
+}
+
+// ---- JSON for types the m2k crate returns (no serde_json dependency there) ----
+
+fn analog_json(s: &stats::Analog) -> Value {
+    json!({
+        "samples": s.samples,
+        "min": s.min,
+        "max": s.max,
+        "mean": s.mean,
+        "rms": s.rms,
+        "ac_rms": s.ac_rms,
+        "vpp": s.vpp(),
+        "frequency": s.frequency,
+        "periods": s.periods,
+        "duty": s.duty,
+        "clipped": s.clipped,
+    })
+}
+
+fn digital_json(d: &stats::Digital) -> Value {
+    json!({
+        "channel": d.channel,
+        "state": d.state(),
+        "edges": d.edges(),
+        "rising": d.rising,
+        "falling": d.falling,
+        "high": d.high,
+        "frequency": d.frequency,
+        "min_pulse": d.min_pulse,
+    })
+}
+
+fn corrections_json(c: &Corrections) -> Value {
+    json!({
+        "calibrated": c.calibrated(),
+        "adc_offset": c.adc_offset,
+        "adc_gain": c.adc_gain,
+        "dac_offset": c.dac_offset,
+        "dac_gain": c.dac_gain,
+    })
 }
 
 // ---- info ----
@@ -543,7 +610,7 @@ fn info(out: &Out, m: &mut M2k, devices: bool) -> Result<()> {
             on_off(supplies[0]),
             on_off(supplies[1])
         );
-        value["calibration"] = corr.json();
+        value["calibration"] = corrections_json(&corr);
         value["calibration"]["factory_table"] = json!(lut);
         value["temperature"] = json!(temperature);
         value["outputs"] = json!({ "w1": outputs[0], "w2": outputs[1] });
@@ -704,59 +771,35 @@ fn attr_of<'a>(
 
 // ---- psu ----
 
-fn psu_status(m: &mut M2k) -> Result<(String, Value)> {
+fn psu_status_text(s: &psu::Status) -> (String, Value) {
     let mut text = vec![];
     let mut value = serde_json::Map::new();
-    for rail in [Rail::Pos, Rail::Neg] {
-        let on = m.psu_enabled(rail)?;
-        let volts = m.psu_read(rail)?;
+    for (name, key, r) in [("V+", "pos", s.pos), ("V-", "neg", s.neg)] {
         text.push(format!(
-            "{}: {} {:+.3} V measured",
-            rail.name(),
-            on_off(on),
-            volts
+            "{name}: {} {:+.3} V measured",
+            on_off(r.enabled),
+            r.measured
         ));
         value.insert(
-            if rail == Rail::Pos { "pos" } else { "neg" }.into(),
-            json!({ "enabled": on, "measured": volts }),
+            key.into(),
+            json!({ "enabled": r.enabled, "measured": r.measured }),
         );
     }
-    Ok((text.join("\n"), Value::Object(value)))
+    (text.join("\n"), Value::Object(value))
 }
 
 fn psu(out: &Out, m: &mut M2k, cmd: PsuCmd) -> Result<()> {
-    match cmd {
-        PsuCmd::Status => {}
+    let status = match cmd {
+        PsuCmd::Status => psu::status(m)?,
         PsuCmd::Set { pos, neg } => {
             if pos.is_none() && neg.is_none() {
                 bail!("give --pos VOLTS and/or --neg VOLTS");
             }
-            for (rail, volts) in [(Rail::Pos, pos), (Rail::Neg, neg)] {
-                if let Some(v) = volts {
-                    // check both before switching anything on
-                    conv::psu_volts_to_raw(rail, v, conv::RailCal::IDENTITY)?;
-                }
-            }
-            for (rail, volts) in [(Rail::Pos, pos), (Rail::Neg, neg)] {
-                if let Some(v) = volts {
-                    m.psu_set(rail, v)?;
-                    m.psu_enable(rail, true)?;
-                }
-            }
-            // the rails settle within a few ms; the monitor ADC needs a moment too
-            std::thread::sleep(Duration::from_millis(200));
+            psu::set(m, pos, neg)?
         }
-        PsuCmd::Off { pos, neg } => {
-            let both = !pos && !neg;
-            for (rail, chosen) in [(Rail::Pos, pos), (Rail::Neg, neg)] {
-                if both || chosen {
-                    m.psu_enable(rail, false)?;
-                    m.psu_set(rail, 0.0)?;
-                }
-            }
-        }
-    }
-    let (text, value) = psu_status(m)?;
+        PsuCmd::Off { pos, neg } => psu::off(m, pos, neg)?,
+    };
+    let (text, value) = psu_status_text(&status);
     out.print(text, value);
     Ok(())
 }
@@ -764,61 +807,36 @@ fn psu(out: &Out, m: &mut M2k, cmd: PsuCmd) -> Result<()> {
 // ---- dmm ----
 
 fn dmm(out: &Out, m: &mut M2k, filter: &[String]) -> Result<()> {
-    let channels = m.dmm_channels();
-    if channels.is_empty() {
-        bail!("{} has no monitor ADC channels (ad9963, xadc)", m.uri);
-    }
-    let mut text = vec![];
-    let mut values = vec![];
-    for (dev, chn, label) in channels {
-        if !filter.is_empty() && !filter.iter().any(|f| label.contains(f.as_str())) {
-            continue;
-        }
-        let (v, unit) = m.dmm_read(&dev, &chn)?;
-        text.push(format!("{label}: {v:.4} {unit}"));
-        values
-            .push(json!({ "channel": label, "device": dev, "id": chn, "value": v, "unit": unit }));
-    }
-    if values.is_empty() {
-        bail!("no monitor channel matches {}", filter.join(", "));
-    }
+    let readings = dmm::readings(m, filter)?;
+    let text: Vec<String> = readings
+        .iter()
+        .map(|r| format!("{}: {:.4} {}", r.channel, r.value, r.unit))
+        .collect();
+    let values: Vec<Value> = readings
+        .iter()
+        .map(|r| {
+            json!({ "channel": r.channel, "device": r.device, "id": r.id, "value": r.value, "unit": r.unit })
+        })
+        .collect();
     out.print(text.join("\n"), json!({ "readings": values }));
     Ok(())
 }
 
 // ---- scope ----
 
-/// A capture of both scope channels, in volts.
-struct Capture {
-    rate: f64,
-    volts: [Vec<f64>; 2],
-    stats: [stats::Analog; 2],
-    ranges: [Range; 2],
-    calibrated: bool,
-}
-
-fn capture(
+/// Captures `samples` samples at `rate` and `ranges`, with a progress bar for long captures and a warning
+/// when the rate asked for is not one the ADC can hit.
+fn do_capture(
     out: &Out,
     m: &mut M2k,
     samples: usize,
     rate: f64,
     ranges: [Range; 2],
-) -> Result<Capture> {
-    let available = m.rates(m2k::ADC)?;
-    let (base, ratio, actual) = conv::plan_adc_rate(rate, &available)?;
-    if (actual - rate).abs() > rate * 1e-6 {
-        out.warn(&format!(
-            "{} is not available, capturing at {}",
-            parse::fmt_unit(rate, "S/s"),
-            parse::fmt_unit(actual, "S/s")
-        ));
-    }
-    let state = m.adc_configure(base, ratio, ranges)?;
-    let secs = samples as f64 / state.rate();
-    m.allow(secs)?;
-    let bytes = (samples.next_multiple_of(m2k::BUFFER_STEP) * 4) as u64;
+) -> Result<scope::Capture> {
+    let secs = samples as f64 / rate;
+    let bytes = (samples.next_multiple_of(device::BUFFER_STEP) * 4) as u64;
     let bar = (secs > 1.0 || samples > 500_000).then(|| out.progress(bytes, "capture"));
-    let raw = m.adc_capture(samples, |n| {
+    let cap = scope::capture(m, samples, rate, ranges, |n| {
         if let Some(b) = &bar {
             b.set_position(n as u64);
         }
@@ -826,32 +844,14 @@ fn capture(
     if let Some(b) = bar {
         b.finish_and_clear();
     }
-    let mut volts = [vec![], vec![]];
-    let mut st = vec![];
-    for i in 0..2 {
-        let scale = state.scale(i)?;
-        volts[i] = raw[i].iter().map(|r| scale.volts(*r)).collect();
-        let clipped = raw[i]
-            .iter()
-            .filter(|r| **r <= conv::ADC_RAW_MIN || **r >= conv::ADC_RAW_MAX)
-            .count();
-        // ten ADC steps: below that a "frequency" is noise
-        st.push(stats::analog(
-            &volts[i],
-            state.rate(),
-            clipped,
-            10.0 * scale.volts_per_lsb(),
+    if (cap.rate - rate).abs() > rate * 1e-6 {
+        out.warn(&format!(
+            "{} is not available, capturing at {}",
+            parse::fmt_unit(rate, "S/s"),
+            parse::fmt_unit(cap.rate, "S/s")
         ));
     }
-    let [s1, s2]: [stats::Analog; 2] =
-        st.try_into().map_err(|_| anyhow::anyhow!("two channels"))?;
-    Ok(Capture {
-        rate: state.rate(),
-        volts,
-        stats: [s1, s2],
-        ranges: [state.channels[0].range, state.channels[1].range],
-        calibrated: !state.uncalibrated(),
-    })
+    Ok(cap)
 }
 
 fn analog_line(name: &str, s: &stats::Analog) -> String {
@@ -875,7 +875,7 @@ fn analog_line(name: &str, s: &stats::Analog) -> String {
     format!("{}: {}", style::bold(name), parts.join(", "))
 }
 
-fn capture_warnings(out: &Out, cap: &Capture) -> Vec<String> {
+fn capture_warnings(out: &Out, cap: &scope::Capture) -> Vec<String> {
     let mut warnings = vec![];
     if !cap.calibrated {
         warnings.push("the M2K was not calibrated since power-up: offsets can be tens of mV off; `m2k cal run` (5 s) fixes that".to_string());
@@ -897,12 +897,12 @@ fn capture_warnings(out: &Out, cap: &Capture) -> Vec<String> {
     warnings
 }
 
-fn scope(out: &Out, m: &mut M2k, args: ScopeArgs) -> Result<()> {
+fn scope_cmd(out: &Out, m: &mut M2k, args: ScopeArgs) -> Result<()> {
     let ranges = [
         args.range1.unwrap_or(args.range).into(),
         args.range2.unwrap_or(args.range).into(),
     ];
-    let cap = capture(out, m, args.samples, args.rate, ranges)?;
+    let cap = do_capture(out, m, args.samples, args.rate, ranges)?;
     let warnings = capture_warnings(out, &cap);
     let mut text = format!(
         "scope: {} samples at {} ({}), ranges ±{} V / ±{} V, {}\n",
@@ -926,8 +926,8 @@ fn scope(out: &Out, m: &mut M2k, args: ScopeArgs) -> Result<()> {
         "rate": cap.rate,
         "ranges": [cap.ranges[0].limit(), cap.ranges[1].limit()],
         "calibrated": cap.calibrated,
-        "ch1": cap.stats[0].json(),
-        "ch2": cap.stats[1].json(),
+        "ch1": analog_json(&cap.stats[0]),
+        "ch2": analog_json(&cap.stats[1]),
         "warnings": warnings,
     });
     if let Some(path) = args.csv {
@@ -968,7 +968,7 @@ fn write_file(path: &std::path::Path, data: &[u8]) -> Result<()> {
 
 fn voltmeter(out: &Out, m: &mut M2k, range: Range) -> Result<()> {
     // 100 ms at 100 kS/s: whole periods of 50 and 60 Hz mains, so hum averages out of the DC value
-    let cap = capture(out, m, 10_000, 100e3, [range, range])?;
+    let cap = do_capture(out, m, 10_000, 100e3, [range, range])?;
     let warnings = capture_warnings(out, &cap);
     let mut text = vec![];
     let mut value =
@@ -990,89 +990,10 @@ fn voltmeter(out: &Out, m: &mut M2k, range: Range) -> Result<()> {
 
 // ---- gen ----
 
-/// One period-filled buffer of a shape, and what it really is.
-struct Wave {
-    rate: f64,
-    volts: Vec<f64>,
-    frequency: Option<f64>,
-    text: String,
-}
-
-fn build_wave(shape: &Shape, rates: &[f64]) -> Result<Wave> {
-    let check = |lo: f64, hi: f64| -> Result<()> {
-        if lo < -conv::DAC_LIMIT - 1e-9 || hi > conv::DAC_LIMIT + 1e-9 {
-            bail!("the signal goes from {lo:.3} to {hi:.3} V; the outputs swing -5 to 5 V");
-        }
-        Ok(())
-    };
-    match shape {
-        Shape::Const { volts } => {
-            check(*volts, *volts)?;
-            let rate = rates.iter().copied().fold(f64::NAN, f64::max);
-            Ok(Wave {
-                rate,
-                volts: vec![*volts; 256],
-                frequency: None,
-                text: format!("constant {volts:+.3} V"),
-            })
-        }
-        Shape::Off => bail!("`off` is not a signal"),
-        Shape::Sine(p) | Shape::Square(p) | Shape::Triangle(p) | Shape::Sawtooth(p) => {
-            if p.amp < 0.0 {
-                bail!("amplitude must not be negative");
-            }
-            check(p.offset - p.amp, p.offset + p.amp)?;
-            if !(0.0..=100.0).contains(&p.duty) {
-                bail!("duty is 0 to 100 %");
-            }
-            let plan = conv::plan_wave(p.freq, rates)?;
-            let name = match shape {
-                Shape::Sine(_) => "sine",
-                Shape::Square(_) => "square",
-                Shape::Triangle(_) => "triangle",
-                _ => "sawtooth",
-            };
-            let phase0 = p.phase / 360.0;
-            let volts = (0..plan.samples)
-                .map(|k| {
-                    let x = (k as f64 * plan.periods as f64 / plan.samples as f64 + phase0)
-                        .rem_euclid(1.0);
-                    let unit = match shape {
-                        Shape::Sine(_) => (std::f64::consts::TAU * x).sin(),
-                        Shape::Square(_) => {
-                            if x < p.duty / 100.0 {
-                                1.0
-                            } else {
-                                -1.0
-                            }
-                        }
-                        Shape::Triangle(_) => 1.0 - 4.0 * (x - 0.5).abs(),
-                        _ => 2.0 * x - 1.0,
-                    };
-                    p.offset + p.amp * unit
-                })
-                .collect();
-            Ok(Wave {
-                rate: plan.sample_rate,
-                volts,
-                frequency: Some(plan.frequency()),
-                text: format!(
-                    "{name} {}, {:.3} V peak, offset {:+.3} V ({} samples at {})",
-                    parse::fmt_unit(plan.frequency(), "Hz"),
-                    p.amp,
-                    p.offset,
-                    plan.samples,
-                    parse::fmt_unit(plan.sample_rate, "S/s")
-                ),
-            })
-        }
-    }
-}
-
 fn gen_cmd(out: &Out, m: &mut M2k, args: GenArgs) -> Result<()> {
     let channels = args.channel.0;
     let names: Vec<String> = channels.iter().map(|c| format!("W{}", c + 1)).collect();
-    if matches!(args.shape, Shape::Off) {
+    let Some(shape) = to_lib_shape(&args.shape) else {
         for c in &channels {
             m.dac_stop(*c)?;
         }
@@ -1081,9 +1002,29 @@ fn gen_cmd(out: &Out, m: &mut M2k, args: GenArgs) -> Result<()> {
             json!({ "outputs": names, "running": false }),
         );
         return Ok(());
-    }
-    let rates = m.rates(m2k::DACS[0])?;
-    let wave = build_wave(&args.shape, &rates)?;
+    };
+    let rates = m.rates(device::DACS[0])?;
+    let wave = wave::build_wave(&shape, &rates)?;
+    let wave_text = match &args.shape {
+        Shape::Const { volts } => format!("constant {volts:+.3} V"),
+        Shape::Sine(p) | Shape::Square(p) | Shape::Triangle(p) | Shape::Sawtooth(p) => {
+            let name = match &args.shape {
+                Shape::Sine(_) => "sine",
+                Shape::Square(_) => "square",
+                Shape::Triangle(_) => "triangle",
+                _ => "sawtooth",
+            };
+            format!(
+                "{name} {}, {:.3} V peak, offset {:+.3} V ({} samples at {})",
+                parse::fmt_unit(wave.frequency.unwrap_or(0.0), "Hz"),
+                p.amp,
+                p.offset,
+                wave.volts.len(),
+                parse::fmt_unit(wave.rate, "S/s")
+            )
+        }
+        Shape::Off => unreachable!("handled above"),
+    };
     let stop = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
@@ -1095,18 +1036,18 @@ fn gen_cmd(out: &Out, m: &mut M2k, args: GenArgs) -> Result<()> {
         for c in &channels {
             let _ = m.dac_stop(*c);
         }
-        return Err(e);
+        return Err(e.into());
     }
     let until = match args.duration {
         Some(d) => format!("for {}", parse::fmt_secs(d.as_secs_f64())),
         None => "until Ctrl+C".to_string(),
     };
     out.print(
-        format!("{}: {}; running {until}", names.join(", "), wave.text),
+        format!("{}: {}; running {until}", names.join(", "), wave_text),
         json!({
             "outputs": names,
             "running": true,
-            "shape": wave.text,
+            "shape": wave_text,
             "frequency": wave.frequency,
             "sample_rate": wave.rate,
             "samples": wave.volts.len(),
@@ -1133,7 +1074,7 @@ fn gen_cmd(out: &Out, m: &mut M2k, args: GenArgs) -> Result<()> {
 
 // ---- logic ----
 
-fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
+fn logic_cmd(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
     let pins = args.pins.0;
     let trigger = LogicTrigger {
         pins: args.trigger,
@@ -1142,9 +1083,13 @@ fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
         wait: args.trigger_wait,
     };
     let secs = args.samples as f64 / args.rate;
-    let bar = (secs > 1.0 || args.samples > 1_000_000)
-        .then(|| out.progress((args.samples.next_multiple_of(4) * 2) as u64, "capture"));
-    let (words, rate) = m.logic_capture(args.samples, args.rate, &trigger, |n| {
+    let bar = (secs > 1.0 || args.samples > 1_000_000).then(|| {
+        out.progress(
+            (args.samples.next_multiple_of(device::BUFFER_STEP) * 2) as u64,
+            "capture",
+        )
+    });
+    let cap = logic::capture(m, args.samples, args.rate, &pins, &trigger, |n| {
         if let Some(b) = &bar {
             b.set_position(n as u64);
         }
@@ -1152,27 +1097,29 @@ fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
     if let Some(b) = bar {
         b.finish_and_clear();
     }
-    if (rate - args.rate).abs() > args.rate * 1e-6 {
+    if (cap.rate - args.rate).abs() > args.rate * 1e-6 {
         out.warn(&format!(
             "logic runs at {}, not {}",
-            parse::fmt_unit(rate, "S/s"),
+            parse::fmt_unit(cap.rate, "S/s"),
             parse::fmt_unit(args.rate, "S/s")
         ));
     }
-    let directions = m.logic_directions().unwrap_or_default();
     let mut text = format!(
         "logic: {} samples at {} ({})\n",
         args.samples,
-        parse::fmt_unit(rate, "S/s"),
-        parse::fmt_secs(args.samples as f64 / rate)
+        parse::fmt_unit(cap.rate, "S/s"),
+        parse::fmt_secs(args.samples as f64 / cap.rate)
     );
     let mut low = vec![];
     let mut high = vec![];
     let mut values = vec![];
-    for pin in &pins {
-        let d = stats::digital(&words, *pin, rate);
-        let dir = directions.get(*pin as usize).cloned().unwrap_or_default();
-        let mut v = d.json();
+    for (pin, d) in pins.iter().zip(&cap.pins) {
+        let dir = cap
+            .directions
+            .get(*pin as usize)
+            .cloned()
+            .unwrap_or_default();
+        let mut v = digital_json(d);
         v["direction"] = json!(dir);
         values.push(v);
         let tag = if dir == "out" { " (output)" } else { "" };
@@ -1224,7 +1171,7 @@ fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
     }
     let mut value = json!({
         "samples": args.samples,
-        "rate": rate,
+        "rate": cap.rate,
         "pins": values,
         "trigger": {
             "pins": trigger.pins.iter().map(|(p, c)| json!({ "pin": p, "condition": c.as_str() })).collect::<Vec<_>>(),
@@ -1239,19 +1186,19 @@ fn logic(out: &Out, m: &mut M2k, args: LogicArgs) -> Result<()> {
             rows += &format!(",dio{p}");
         }
         rows.push('\n');
-        for (k, w) in words.iter().enumerate() {
-            rows += &format!("{:.9}", k as f64 / rate);
+        for (k, w) in cap.words.iter().enumerate() {
+            rows += &format!("{:.9}", k as f64 / cap.rate);
             for p in &pins {
                 rows += if w >> p & 1 == 1 { ",1" } else { ",0" };
             }
             rows.push('\n');
         }
         write_file(&path, rows.as_bytes())?;
-        text += &format!("csv: {} ({} rows)\n", path.display(), words.len());
+        text += &format!("csv: {} ({} rows)\n", path.display(), cap.words.len());
         value["csv"] = json!(path.display().to_string());
     }
     if let Some(path) = args.vcd {
-        write_vcd(&path, &pins, &words, rate)?;
+        write_vcd(&path, &pins, &cap.words, cap.rate)?;
         text += &format!("vcd: {} ({} pins)", path.display(), pins.len());
         value["vcd"] = json!(path.display().to_string());
     }
@@ -1401,7 +1348,7 @@ fn digital_out(out: &Out, m: &mut M2k, args: DigitalOutArgs) -> Result<()> {
         Ok(r) => r,
         Err(e) => {
             let _ = m.digital_stop(&pins);
-            return Err(e);
+            return Err(e.into());
         }
     };
     if (actual - args.rate).abs() > args.rate * 1e-6 {
@@ -1475,7 +1422,7 @@ fn digital_out(out: &Out, m: &mut M2k, args: DigitalOutArgs) -> Result<()> {
 
 // ---- cal ----
 
-fn cal(out: &Out, m: &mut M2k, cmd: CalCmd) -> Result<()> {
+fn cal_cmd(out: &Out, m: &mut M2k, cmd: CalCmd) -> Result<()> {
     match cmd {
         CalCmd::Status => {
             let c = Corrections::read(m)?;
@@ -1484,23 +1431,16 @@ fn cal(out: &Out, m: &mut M2k, cmd: CalCmd) -> Result<()> {
             } else {
                 style::yellow("not calibrated since power-up (`m2k cal run`)")
             };
-            out.print(format!("{head}\n{}", c.text()), c.json());
+            out.print(format!("{head}\n{}", c.text()), corrections_json(&c));
         }
         CalCmd::Run { adc_only } => {
             let start = Instant::now();
             let bar = out.spinner("calibrating");
             let mut step = |s: &str| bar.set_message(s.to_string());
-            let res = calib::calibrate_adc(m, &mut step).and_then(|(_, adc_gain)| {
-                if adc_only {
-                    Ok(())
-                } else {
-                    calib::calibrate_dac(m, adc_gain, &mut step).map(|_| ())
-                }
-            });
+            let res = cal::run(m, adc_only, &mut step);
             bar.finish_and_clear();
-            res?;
-            let c = Corrections::read(m)?;
-            let mut v = c.json();
+            let c = res?;
+            let mut v = corrections_json(&c);
             v["seconds"] = json!(start.elapsed().as_secs_f64());
             v["adc_only"] = json!(adc_only);
             out.print(
@@ -1518,9 +1458,9 @@ fn cal(out: &Out, m: &mut M2k, cmd: CalCmd) -> Result<()> {
             );
         }
         CalCmd::Lut => {
-            let (temperature, row) = calib::apply_lut(m)?;
+            let (temperature, row) = cal::apply_lut(m)?;
             let c = Corrections::read(m)?;
-            let mut v = c.json();
+            let mut v = corrections_json(&c);
             v["temperature"] = json!(temperature);
             v["table_temperature"] = json!(row.temperature);
             out.print(
@@ -1533,11 +1473,11 @@ fn cal(out: &Out, m: &mut M2k, cmd: CalCmd) -> Result<()> {
             );
         }
         CalCmd::Reset => {
-            calib::reset(m)?;
+            cal::reset(m)?;
             let c = Corrections::read(m)?;
             out.print(
                 format!("corrections reset to power-on values\n{}", c.text()),
-                c.json(),
+                corrections_json(&c),
             );
         }
     }
@@ -1547,52 +1487,6 @@ fn cal(out: &Out, m: &mut M2k, cmd: CalCmd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const RATES: [f64; 6] = [750.0, 7500.0, 75e3, 75e4, 75e5, 75e6];
-
-    fn periodic(freq: f64, amp: f64, offset: f64) -> Periodic {
-        Periodic {
-            freq,
-            amp,
-            offset,
-            phase: 0.0,
-            duty: 50.0,
-        }
-    }
-
-    #[test]
-    fn waves() {
-        let w = build_wave(&Shape::Sine(periodic(1000.0, 1.0, 0.5)), &RATES).unwrap();
-        assert_eq!(w.volts.len(), 75000);
-        let max = w.volts.iter().copied().fold(f64::MIN, f64::max);
-        let min = w.volts.iter().copied().fold(f64::MAX, f64::min);
-        assert!(
-            (max - 1.5).abs() < 1e-6 && (min + 0.5).abs() < 1e-6,
-            "{min} {max}"
-        );
-        let t = build_wave(&Shape::Triangle(periodic(1e6, 2.0, 0.0)), &RATES).unwrap();
-        let max = t.volts.iter().copied().fold(f64::MIN, f64::max);
-        let min = t.volts.iter().copied().fold(f64::MAX, f64::min);
-        assert!(
-            max <= 2.0 + 1e-9 && min >= -2.0 - 1e-9 && max > 1.5 && min < -1.5,
-            "{min} {max}"
-        );
-        let sq = build_wave(
-            &Shape::Square(Periodic {
-                duty: 25.0,
-                ..periodic(1e6, 1.0, 0.0)
-            }),
-            &RATES,
-        )
-        .unwrap();
-        let high = sq.volts.iter().filter(|v| **v > 0.0).count() as f64 / sq.volts.len() as f64;
-        assert!((high - 0.25).abs() < 0.02, "{high}");
-        let c = build_wave(&Shape::Const { volts: -1.25 }, &RATES).unwrap();
-        assert_eq!(c.rate, 75e6);
-        assert!(c.volts.iter().all(|v| *v == -1.25));
-        assert!(build_wave(&Shape::Sine(periodic(1000.0, 3.0, 3.0)), &RATES).is_err());
-        assert!(build_wave(&Shape::Const { volts: 6.0 }, &RATES).is_err());
-    }
 
     #[test]
     fn cli_parses() {

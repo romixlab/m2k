@@ -5,7 +5,6 @@
 //! 192.168.2.1, 300 ms to answer), else from the ADALM2000's known devices. The Bash adapter ([Bash]) is the one
 //! from wire_weaver_cli and saleae_cli (keep in sync), so values with spaces complete as one word.
 
-use crate::m2k;
 use clap::Command;
 use clap_complete::CompleteEnv;
 use clap_complete::CompletionCandidate;

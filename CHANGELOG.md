@@ -6,6 +6,20 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+### Added
+
+- `m2k` library crate (`crates/m2k`): the typed API behind every CLI command (device, conversions,
+  calibration, capture summaries, and `scope`/`gen`/`logic`/`psu`/`dmm` as typed calls returning
+  structs/arrays), with its own `m2k::Error` and no `anyhow`/`serde_json`/`clap` dependency (CLI-5).
+- `m2k_py` Python module (`crates/m2k_py`): PyO3 (abi3, Python >= 3.9), the `M2k` class and data classes on
+  top of the `m2k` library, built by maturin; `just test-py` runs its offline pytest smoke test (PY-1).
+
+### Changed
+
+- `m2k_cli` is now the thin CLI on top of `crates/m2k` (library-first split, tpm CLAUDE.md "Code repos"):
+  same commands, flags, JSON output and shell completion as before, no functional change (CLI-5).
+  `cargo install --path .` becomes `cargo install --path crates/m2k_cli`.
+
 ## [0.4.1] - 2026-10-10
 
 ### Fixed

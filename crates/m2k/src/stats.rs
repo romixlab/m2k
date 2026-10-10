@@ -1,6 +1,4 @@
-//! What a capture looks like in a few numbers: the lines `scope`, `voltmeter` and `logic` print.
-
-use serde_json::{Value, json};
+//! What a capture looks like in a few numbers: summaries behind `scope`, `voltmeter` and `logic`.
 
 /// Summary of an analog capture of one channel.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,22 +24,6 @@ pub struct Analog {
 impl Analog {
     pub fn vpp(&self) -> f64 {
         self.max - self.min
-    }
-
-    pub fn json(&self) -> Value {
-        json!({
-            "samples": self.samples,
-            "min": self.min,
-            "max": self.max,
-            "mean": self.mean,
-            "rms": self.rms,
-            "ac_rms": self.ac_rms,
-            "vpp": self.vpp(),
-            "frequency": self.frequency,
-            "periods": self.periods,
-            "duty": self.duty,
-            "clipped": self.clipped,
-        })
     }
 }
 
@@ -176,19 +158,6 @@ impl Digital {
             (0, true) => "high",
             _ => "toggling",
         }
-    }
-
-    pub fn json(&self) -> Value {
-        json!({
-            "channel": self.channel,
-            "state": self.state(),
-            "edges": self.edges(),
-            "rising": self.rising,
-            "falling": self.falling,
-            "high": self.high,
-            "frequency": self.frequency,
-            "min_pulse": self.min_pulse,
-        })
     }
 }
 

@@ -2,7 +2,7 @@
 //! it (scope inputs, signal outputs, supplies, monitors, digital pins).
 
 use crate::conv::{self, AdcScale, Rail, RailCal, Range};
-use anyhow::{Context as _, Result, anyhow, bail};
+use crate::error::{Context as _, Result, bail, err};
 use iiod_client::{Attr, Channel, Client, Context, Device};
 use std::time::Duration;
 
@@ -155,7 +155,7 @@ impl M2k {
     pub fn device(&self, name: &str) -> Result<&Device> {
         self.ctx
             .device(name)
-            .ok_or_else(|| anyhow!("no IIO device `{name}` at {}", self.uri))
+            .ok_or_else(|| err!("no IIO device `{name}` at {}", self.uri))
     }
 
     fn id(&self, name: &str) -> Result<String> {
@@ -350,7 +350,7 @@ impl M2k {
     /// The output lasts as long as this connection: iiod frees the buffers when it ends.
     pub fn dac_start(&mut self, channels: &[usize], sample_rate: f64, volts: &[f64]) -> Result<()> {
         let compensation = conv::dac_filter_compensation(sample_rate)
-            .ok_or_else(|| anyhow!("no filter compensation for a DAC rate of {sample_rate} S/s"))?;
+            .ok_or_else(|| err!("no filter compensation for a DAC rate of {sample_rate} S/s"))?;
         let raw: Vec<i16> = volts
             .iter()
             .map(|v| conv::dac_volts_to_raw(*v, compensation))
@@ -384,7 +384,7 @@ impl M2k {
                 .channels
                 .iter()
                 .find(|c| c.output && c.scan.is_some())
-                .ok_or_else(|| anyhow!("{} has no buffered output channel", dev.label()))?;
+                .ok_or_else(|| err!("{} has no buffered output channel", dev.label()))?;
             let format = chn.scan.map(|s| s.format).unwrap_or(I16_LE);
             let mut data = Vec::with_capacity(raw.len() * 2);
             for sample in raw {
@@ -552,7 +552,7 @@ impl M2k {
         let value_attr = ["raw", "processed", "input"]
             .into_iter()
             .find(|a| has(a))
-            .ok_or_else(|| anyhow!("{dev} {chn} has no value to read"))?;
+            .ok_or_else(|| err!("{dev} {chn} has no value to read"))?;
         let (has_offset, has_scale) = (has("offset"), has("scale"));
         let value = self.get_f64(dev, chn_attr((chn, false), value_attr))?;
         let offset = if has_offset {
@@ -837,7 +837,7 @@ fn rail_chn(rail: Rail) -> &'static str {
 fn dac_name(channel: usize) -> Result<&'static str> {
     DACS.get(channel)
         .copied()
-        .ok_or_else(|| anyhow!("no output channel {}", channel + 1))
+        .ok_or_else(|| err!("no output channel {}", channel + 1))
 }
 
 /// An open scope buffer.
@@ -874,10 +874,10 @@ impl AdcBuffer {
                 .channels
                 .iter()
                 .position(|c| !c.output && c.id == adc_chn(i))
-                .ok_or_else(|| anyhow!("{} has no channel {}", self.dev.label(), adc_chn(i)))?;
+                .ok_or_else(|| err!("{} has no channel {}", self.dev.label(), adc_chn(i)))?;
             *ch = layout
                 .extract(index, &data)
-                .ok_or_else(|| anyhow!("{} did not capture {}", self.dev.label(), adc_chn(i)))?;
+                .ok_or_else(|| err!("{} did not capture {}", self.dev.label(), adc_chn(i)))?;
             if ch.len() < self.samples {
                 bail!(
                     "{} sent {} of {} samples",
@@ -947,7 +947,7 @@ impl AdcState {
         let ch = self.channels[channel.min(1)];
         let filter_compensation =
             conv::adc_filter_compensation(self.sample_rate).ok_or_else(|| {
-                anyhow!(
+                err!(
                     "no filter compensation for an ADC rate of {} S/s",
                     self.sample_rate
                 )

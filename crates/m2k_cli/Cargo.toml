@@ -1,0 +1,28 @@
+[package]
+name = "m2k_cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "CLI and agent skill for the Analog Devices ADALM2000 (M2K), on top of the m2k library"
+readme = "../../README.md"
+keywords = ["adalm2000", "m2k", "iio", "oscilloscope", "cli"]
+categories = ["command-line-utilities", "hardware-support", "development-tools::debugging"]
+
+[[bin]]
+name = "m2k"
+path = "src/main.rs"
+
+[dependencies]
+m2k.workspace = true
+iiod_client.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+ctrlc.workspace = true
+indicatif.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

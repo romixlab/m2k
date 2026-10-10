@@ -5,7 +5,8 @@ description: Measure and drive circuits with an Analog Devices ADALM2000 (M2K) t
 
 # ADALM2000 (M2K)
 
-The `m2k` CLI (source: https://github.com/romixlab/m2k_cli; `cargo install --path .` in a checkout) talks to the
+The `m2k` CLI (source: https://github.com/romixlab/m2k_cli; `cargo install --path crates/m2k_cli` in a checkout)
+talks to the
 iiod daemon on the M2K over its USB network (`192.168.2.1`), no libiio or Scopy needed. Every command takes
 `--json` (errors become `{"error": "..."}` with exit code 1); text output is one fact per line.
 

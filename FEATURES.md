@@ -10,7 +10,8 @@ This file is the single source of truth for what m2k_cli does, what is broken an
   🔍 needs a check.
 - **IDs** (`SCOPE-3`) are stable: never renumber or reuse one. New ids come from `tpm work claim AREA`. Use the ID
   in commit messages, CHANGELOG entries and code `TODO`s (`// TODO(SCOPE-3): ...`); name it with a short slug
-  when talking to people (`SCOPE-3 vertical-offset`).
+  when talking to people (`SCOPE-3 vertical-offset`). Areas: `IIO`, `DEV`, `PSU`, `DMM`, `SCOPE`, `GEN`,
+  `LOGIC`, `CAL`, `CLI`, `PY`, `SKILL`, `DAEMON`.
 - When finishing work, update the item in the same commit. Obsolete items go to *Dropped and superseded*.
 
 Real-device checks so far: one ADALM2000 Rev.D, firmware v0.27 (iiod 0.21), over its USB network, with W1 wired
@@ -115,6 +116,12 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
   picosecond timescale, only the samples where a reported pin changed (`$dumpvars` for the initial state).
   For sigrok and other waveform viewers to import captures (cross-check plan P2623). Not yet confirmed against
   `sigrok-cli` (not installed on this machine yet).
+- 🐛 **LOGIC-6 emu test vs. current iio-emu HEAD**: `tests/emu.rs::digital_out_and_logic_trigger` expects the VCD
+  timescale `1 ps` for `logic -n 1000 -p 0-3` (no `-r`, so the default `1M`); against a freshly built iio-emu
+  (git HEAD, 10 Oct 2026, not the pinned 0.2.0 `adalm2000` profile AGENTS.md records) it fails the same way on
+  main before this split, so it is a pre-existing emulator-version drift, not a regression (found while
+  verifying CLI-5). The other four `tests/emu.rs` tests and all `tests/device.rs` pass. Needs a pinned
+  iio-emu version or a look at what rate the logic analyzer now negotiates there.
 - Max sample rate: both `logic` and `digital out` share one clock divided down from 100 MS/s for however many
   of the 16 pins are involved; asking for fewer pins (`-p`) does not raise the limit, unlike e.g. a Saleae
   Logic 8 (saleae_cli). The rate is rounded to the nearest the divider can hit; a warning says the real rate
@@ -146,6 +153,25 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
 - ✅ **CLI-4 Colour and progress**: colour on a terminal without `NO_COLOR`; progress bars for captures over 1 s or
   500k samples, a spinner with the current step for `cal run`; nothing of either with `--json` or when not a
   terminal.
+- 🧪 **CLI-5 Library-first split** (P2618#10oct-1107c): `crates/m2k` is the typed API (device, conversions,
+  calibration, capture summaries, and the typed calls `scope`/`gen`/`logic`/`psu`/`dmm` behind each CLI
+  command) with no `anyhow`/`serde_json`/`clap` dependency and its own `m2k::Error` (thiserror); `crates/m2k_cli`
+  is the same `m2k` binary as before (unchanged commands, flags, JSON output, shell completion) now calling
+  into it; `crates/m2k_py` is new (PY-1). No functional change to any CLI command. Verified: `cargo test
+  --workspace` (all unit tests), `crates/m2k_cli/tests/emu.rs` against a freshly built iio-emu (4 of 5 pass;
+  the fifth is LOGIC-6, pre-existing on main too) and `tests/device.rs` (3 of 3, skipped without
+  `M2K_TEST_URI`); not yet rerun against a real M2K since the split (the underlying device/calibration code
+  is unchanged from what was checked there before, 9-10 Oct 2026).
+
+## Python module (`PY`)
+
+- 🧪 **PY-1 m2k_py** (P2618#10oct-1107c): `crates/m2k_py`, a PyO3 module (abi3, Python >= 3.9) wrapping
+  `crates/m2k`'s typed API: `M2k` class with `scope`, `voltmeter`, `logic`, `gen_start`/`gen_stop`,
+  `psu_status`/`psu_set`/`psu_off`, `dmm`, `cal_run`/`cal_status`/`cal_reset`, `temperature`; data classes for
+  each typed call's result; errors as `M2kError`. `gen_start` takes a plain sample array (build it with numpy)
+  rather than the CLI's shape flags — no Python equivalent of `gen::build_wave` yet. Verified:
+  `tests/test_smoke.py` (offline: module shape and error mapping, no M2K or emulator) via `just test-py`; not
+  yet exercised against the emulator or a real M2K.
 
 ## Agent skill (`SKILL`)
 

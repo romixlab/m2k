@@ -1,33 +1,23 @@
 [workspace]
-members = ["crates/iiod_client"]
+resolver = "3"
+members = ["crates/iiod_client", "crates/m2k", "crates/m2k_cli", "crates/m2k_py"]
 
 [workspace.package]
 version = "0.4.1"
-
-[package]
-name = "m2k_cli"
-version.workspace = true
 edition = "2024"
-description = "CLI and agent skill for the Analog Devices ADALM2000 (M2K) over a pure-Rust iiod client"
 authors = ["Roman Isaikin <roman@vhrd.tech>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/romixlab/m2k_cli"
-readme = "README.md"
-keywords = ["adalm2000", "m2k", "iio", "oscilloscope", "cli"]
-categories = ["command-line-utilities", "hardware-support", "development-tools::debugging"]
 rust-version = "1.88"
 
-[[bin]]
-name = "m2k"
-path = "src/main.rs"
-
-[dependencies]
+[workspace.dependencies]
+m2k = { path = "crates/m2k", version = "0.4.1" }
+iiod_client = { path = "crates/iiod_client", version = "0.4.1" }
 anyhow = "1"
 clap = { version = "4.6", features = ["derive", "env"] }
 clap_complete = { version = "4.6", features = ["unstable-dynamic"] }
 ctrlc = { version = "3.5", features = ["termination"] }
-iiod_client = { path = "crates/iiod_client", version = "0.4.1" }
 indicatif = "0.18"
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
 serde_json = "1"
-
-[dev-dependencies]
+thiserror = "2"

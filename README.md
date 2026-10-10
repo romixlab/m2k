@@ -1,11 +1,11 @@
 # m2k_cli
 
-`m2k`: a Rust CLI and agent skill for the Analog Devices ADALM2000 (M2K): scope, signal generator, power
-supplies, voltmeter, logic analyzer and calibration, over the network with a pure-Rust iiod client (no libiio,
-no libm2k, no C).
+`m2k`: a Rust library, CLI and agent skill, and a Python module, for the Analog Devices ADALM2000 (M2K):
+scope, signal generator, power supplies, voltmeter, logic analyzer and calibration, over the network with a
+pure-Rust iiod client (no libiio, no libm2k, no C).
 
 ```sh
-cargo install --path .                      # (crates.io: not published yet)
+cargo install --path crates/m2k_cli         # (crates.io: not published yet)
 m2k info                                    # model, serial, firmware, calibration, outputs, supplies
 m2k cal run                                 # self-calibration, ~1.5 s; kept until power-off
 m2k scope -n 10k -r 1M --csv cap.csv        # both channels: stats per channel, all samples as CSV
@@ -23,6 +23,10 @@ The M2K shows up as a USB network adapter; `m2k` talks to iiod at `192.168.2.1:3
 - Agent skill: [skills/m2k/SKILL.md](skills/m2k/SKILL.md)
 - Features, status and what was verified on a real M2K: [FEATURES.md](FEATURES.md); changes:
   [CHANGELOG.md](CHANGELOG.md); dev rules: [AGENTS.md](AGENTS.md)
+- [`crates/m2k`](crates/m2k): the typed Rust library on its own (no CLI, no JSON); `crates/m2k_cli` above is
+  the thin CLI built on it.
+- [`crates/m2k_py`](crates/m2k_py): a Python module (PyO3 + maturin) for notebooks and test benches,
+  `pip install` from a checkout with `maturin develop` or `uv run` inside it.
 - [`crates/iiod_client`](crates/iiod_client): the iiod client on its own, for any IIO device (ADALM-Pluto, ...).
 
 The conversions and the calibration procedure follow ADI's [libm2k](https://github.com/analogdevicesinc/libm2k);
