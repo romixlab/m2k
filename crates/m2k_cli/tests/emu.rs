@@ -305,3 +305,130 @@ fn logic_and_calibration() {
     let v = json(&emu.uri, &["cal", "reset"]);
     assert_eq!(v["calibrated"], false);
 }
+
+/// A stand-in for `ssh` on PATH: asks its `SSH_ASKPASS` program (the `m2k` binary) for the password like ssh
+/// does, lets `analog` in and answers like the M2K's shell; the LED state lives in a file next to it.
+#[cfg(unix)]
+fn fake_ssh_dir() -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("m2k_cli_test_ssh_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ssh = dir.join("ssh");
+    std::fs::write(
+        &ssh,
+        r#"#!/bin/sh
+dir=$(dirname "$0")
+[ "$("$SSH_ASKPASS" "root@127.0.0.1's password: ")" = analog ] \
+    || { echo "root@127.0.0.1: Permission denied (publickey,password)." >&2; exit 255; }
+for last; do :; done
+case "$last" in
+"echo none"*) echo off > "$dir/state" ;;
+"echo heartbeat"*) echo on > "$dir/state" ;;
+esac
+if [ "$(cat "$dir/state" 2>/dev/null)" = off ]; then
+    printf '[none] timer heartbeat\n0\n'
+else
+    printf 'none timer [heartbeat]\n255\n'
+fi
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
+#[cfg(unix)]
+#[test]
+fn leds() {
+    let Some(emu) = emu() else { return };
+    let dir = fake_ssh_dir();
+    let path = format!(
+        "{}:{}",
+        dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = |args: &[&str], password: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_m2k"));
+        cmd.args(["--uri", &emu.uri, "--json"])
+            .args(args)
+            .env("PATH", &path)
+            .env_remove("M2K_SSH_PASSWORD")
+            .env_remove("M2K_SSH_KNOWN_HOSTS");
+        if let Some(p) = password {
+            cmd.env("M2K_SSH_PASSWORD", p);
+        }
+        let out = cmd.output().expect("run m2k");
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let v: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap_or_default())
+            .unwrap_or_else(|e| panic!("m2k {args:?}: not JSON ({e}): {stdout}"));
+        (out.status.code(), v)
+    };
+
+    let (code, v) = run(&["led", "off"], None);
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["done"]["on"], false, "{v}");
+    assert_eq!(v["ready"]["on"], false, "{v}");
+    assert_eq!(v["ready"]["trigger"], "none");
+    assert_eq!(v["partial"], false);
+    let v = json(
+        &emu.uri,
+        &[
+            "attr",
+            "m2k-fabric",
+            "-c",
+            "voltage4",
+            "-o",
+            "done_led_overwrite_powerdown",
+        ],
+    );
+    assert_eq!(v["value"], "1");
+
+    let (code, v) = run(&["led", "on", "--only", "done"], None);
+    assert_eq!(code, Some(0));
+    assert_eq!(v["done"]["on"], true, "{v}");
+    assert!(v["ready"].is_null(), "{v}");
+    let (_, v) = run(&["led"], None);
+    assert_eq!(v["done"]["on"], true, "{v}");
+    assert_eq!(v["ready"]["on"], false, "{v}");
+    let (_, v) = run(&["led", "on", "--only", "ready"], None);
+    assert!(v["done"].is_null(), "{v}");
+    assert_eq!(v["ready"]["trigger"], "heartbeat", "{v}");
+
+    // a refused login: the DONE LED still switches, the Ready LED is named as not changed, exit code 1;
+    // the password is nowhere in the output
+    let kh = dir.join("known_hosts");
+    let (code, v) = run(
+        &["led", "off", "--ssh-known-hosts", kh.to_str().unwrap()],
+        Some("s3cret-not-analog"),
+    );
+    assert_eq!(code, Some(1), "{v}");
+    assert_eq!(v["done"]["on"], false, "{v}");
+    assert_eq!(v["ready"]["changed"], false, "{v}");
+    assert_eq!(v["partial"], true);
+    assert!(
+        v["ready"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("wrong password"),
+        "{v}"
+    );
+    assert!(!v.to_string().contains("s3cret"), "{v}");
+    // status with the same trouble is not a failure: the Ready LED is just unknown
+    let (code, v) = run(
+        &["led", "--ssh-known-hosts", kh.to_str().unwrap()],
+        Some("s3cret-not-analog"),
+    );
+    assert_eq!(code, Some(0), "{v}");
+    assert_eq!(v["ready"]["on"], serde_json::Value::Null, "{v}");
+    // another password without a pinned host key is not sent at all
+    let (code, v) = run(&["led", "off"], Some("s3cret-not-analog"));
+    assert_eq!(code, Some(1));
+    assert!(
+        v["ready"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("known hosts file"),
+        "{v}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

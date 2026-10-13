@@ -10,6 +10,9 @@ import pytest
 def test_module_shape():
     assert hasattr(m2k, "M2k")
     assert issubclass(m2k.M2kError, Exception)
+    for name in ("led_status", "led_off", "led_on"):
+        assert callable(getattr(m2k.M2k, name))
+    assert hasattr(m2k, "LedStatus")
 
 
 def test_connect_refused_raises_m2kerror_quickly():

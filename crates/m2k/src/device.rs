@@ -82,6 +82,9 @@ pub struct M2k {
 /// A channel of a device: (id, is output).
 pub type Chn<'a> = (&'a str, bool);
 
+/// The fabric channel with the DONE LED override.
+const DONE_LED: Chn<'static> = ("voltage4", true);
+
 fn chn_attr<'a>(chn: Chn<'a>, attr: &'a str) -> Attr<'a> {
     Attr::Channel {
         channel: chn.0,
@@ -507,6 +510,32 @@ impl M2k {
                     !on,
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    /// The steady blue DONE LED is on. Errors on firmware without the override (before v0.26).
+    pub fn done_led(&mut self) -> Result<bool> {
+        self.require_done_led()?;
+        Ok(!self.get_bool(FABRIC, chn_attr(DONE_LED, "done_led_overwrite_powerdown"))?)
+    }
+
+    /// Switches the DONE LED, as libm2k's `setLed` does. RAM only: it is back on after a power cycle.
+    pub fn set_done_led(&mut self, on: bool) -> Result<()> {
+        self.require_done_led()?;
+        self.set_bool(
+            FABRIC,
+            chn_attr(DONE_LED, "done_led_overwrite_powerdown"),
+            !on,
+        )
+    }
+
+    fn require_done_led(&self) -> Result<()> {
+        if !self.has_channel_attr(FABRIC, DONE_LED, "done_led_overwrite_powerdown") {
+            bail!(
+                "this M2K's firmware ({}) cannot switch the DONE LED (no `done_led_overwrite_powerdown` on {FABRIC})",
+                self.ctx.attr("fw_version").unwrap_or("unknown")
+            );
         }
         Ok(())
     }

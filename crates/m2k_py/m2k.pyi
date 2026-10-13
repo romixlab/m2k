@@ -87,6 +87,19 @@ class Corrections:
     dac_offset: list[int]
     dac_gain: list[float]
 
+class LedStatus:
+    """The two blue LEDs (`M2k.led_status`/`led_off`/`led_on`); `None` for an LED that was not asked for."""
+
+    done: bool | None
+    """The steady DONE LED is on."""
+    ready: bool | None
+    """The blinking Ready LED is on; `None` also when ssh could not reach it (see `ready_error`)."""
+    ready_trigger: str | None
+    """Its kernel trigger: `heartbeat` (blinking) or `none`."""
+    ready_error: str | None
+    """Why ssh could not reach the Ready LED (no ssh, no `m2k` CLI on PATH, login refused); it was not changed
+    then, while the DONE LED was."""
+
 class M2k:
     """A connection to an ADALM2000, over its iiod daemon (`ip:192.168.2.1:30431` by default)."""
 
@@ -141,3 +154,35 @@ class M2k:
 
     def cal_reset(self) -> Corrections:
         """Back to the power-on values: no correction at all."""
+
+    def led_status(
+        self,
+        only: str | None = None,
+        ssh_password: str | None = None,
+        ssh_known_hosts: str | None = None,
+    ) -> LedStatus:
+        """The two blue LEDs as they are now; `only="done"` or `only="ready"` for one of them.
+
+        The steady DONE LED goes through iiod. The blinking Ready LED is the kernel's heartbeat LED, which only
+        a shell on the M2K reaches: the system `ssh` logs in as root with `ssh_password`, else the environment
+        variable `M2K_SSH_PASSWORD`, else the factory password. The password reaches ssh through the `m2k`
+        CLI on PATH acting as its askpass helper (in the environment of the ssh child: no file, no command
+        line). The host key is not checked for the factory password; another password is only sent with
+        `ssh_known_hosts`, a file of your own that pins the key on first use."""
+
+    def led_off(
+        self,
+        only: str | None = None,
+        ssh_password: str | None = None,
+        ssh_known_hosts: str | None = None,
+    ) -> LedStatus:
+        """Switches the LEDs off. RAM only: both are back on after a power cycle. When ssh cannot reach the
+        Ready LED the DONE LED is still switched and `ready_error` says why."""
+
+    def led_on(
+        self,
+        only: str | None = None,
+        ssh_password: str | None = None,
+        ssh_known_hosts: str | None = None,
+    ) -> LedStatus:
+        """Switches the LEDs back on (Ready blinks again); arguments as for `led_status`."""

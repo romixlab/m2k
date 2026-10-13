@@ -15,8 +15,8 @@
 //! ```
 //!
 //! The M2K's devices and attributes are in [`device`], raw-to-volts conversions with libm2k's constants in
-//! [`conv`], self-calibration in [`cal`]; [`scope`], [`wave`] (behind `m2k gen`), [`logic`], [`psu`] and
-//! [`dmm`] are the typed calls behind the CLI commands of the same name, [`stats`] the capture summaries they
+//! [`conv`], self-calibration in [`cal`]; [`scope`], [`wave`] (behind `m2k gen`), [`logic`], [`psu`], [`dmm`]
+//! and [`led`] are the typed calls behind the CLI commands of the same name, [`stats`] the capture summaries they
 //! return.
 
 // two channels with parallel arrays everywhere: index loops read better than zips
@@ -27,6 +27,7 @@ pub mod conv;
 pub mod device;
 pub mod dmm;
 mod error;
+pub mod led;
 pub mod logic;
 pub mod psu;
 pub mod scope;

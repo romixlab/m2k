@@ -177,6 +177,47 @@ impl From<m2k_lib::cal::Corrections> for Corrections {
     }
 }
 
+/// Both LEDs after `M2k.led_status`/`led_off`/`led_on`; `None` for an LED that was not asked for.
+#[pyclass(get_all, skip_from_py_object)]
+#[derive(Clone)]
+struct LedStatus {
+    /// The steady DONE LED is on.
+    done: Option<bool>,
+    /// The blinking Ready LED is on; `None` also when ssh could not reach it (see `ready_error`).
+    ready: Option<bool>,
+    /// Its kernel trigger: `heartbeat` (blinking) or `none`.
+    ready_trigger: Option<String>,
+    /// Why ssh could not reach the Ready LED; it was not changed then.
+    ready_error: Option<String>,
+}
+
+impl From<m2k_lib::led::Status> for LedStatus {
+    fn from(s: m2k_lib::led::Status) -> Self {
+        let (ready, ready_trigger, ready_error) = match s.ready {
+            Some(Ok(r)) => (Some(r.on), Some(r.trigger), None),
+            Some(Err(e)) => (None, None, Some(e.to_string())),
+            None => (None, None, None),
+        };
+        LedStatus {
+            done: s.done,
+            ready,
+            ready_trigger,
+            ready_error,
+        }
+    }
+}
+
+fn led_of(only: Option<&str>) -> PyResult<Option<m2k_lib::led::Led>> {
+    match only {
+        None => Ok(None),
+        Some("done") => Ok(Some(m2k_lib::led::Led::Done)),
+        Some("ready") => Ok(Some(m2k_lib::led::Led::Ready)),
+        Some(other) => Err(M2kError::new_err(format!(
+            "only=`{other}`: the LEDs are `done` and `ready`"
+        ))),
+    }
+}
+
 fn range_of(volts: f64) -> m2k_lib::conv::Range {
     if volts <= 2.5 {
         m2k_lib::conv::Range::V2_5
@@ -187,7 +228,37 @@ fn range_of(volts: f64) -> m2k_lib::conv::Range {
 
 /// A connection to an ADALM2000.
 #[pyclass]
-struct M2k(m2k_lib::M2k);
+struct M2k(m2k_lib::M2k, Duration);
+
+impl M2k {
+    /// How `led_*` reach the shell on the M2K: the `m2k` CLI on PATH is the askpass helper.
+    fn ssh(
+        &self,
+        password: Option<String>,
+        known_hosts: Option<std::path::PathBuf>,
+    ) -> m2k_lib::led::Ssh {
+        let mut ssh = m2k_lib::led::Ssh::new(self.1);
+        ssh.password = match password {
+            Some(p) => m2k_lib::led::Password::new(p),
+            None => m2k_lib::led::Password::from_env(),
+        };
+        ssh.known_hosts = known_hosts;
+        ssh
+    }
+
+    fn led_set(
+        &mut self,
+        on: bool,
+        only: Option<&str>,
+        ssh_password: Option<String>,
+        ssh_known_hosts: Option<std::path::PathBuf>,
+    ) -> PyResult<LedStatus> {
+        let ssh = self.ssh(ssh_password, ssh_known_hosts);
+        m2k_lib::led::set(&mut self.0, on, led_of(only)?, &ssh)
+            .map(LedStatus::from)
+            .map_err(err)
+    }
+}
 
 #[pymethods]
 impl M2k {
@@ -197,10 +268,12 @@ impl M2k {
     #[pyo3(signature = (uri=None, timeout=5.0))]
     fn new(uri: Option<&str>, timeout: f64) -> PyResult<Self> {
         let uri = uri.unwrap_or(m2k_lib::DEFAULT_URI);
-        let mut dev = m2k_lib::M2k::connect(uri, Duration::from_secs_f64(timeout)).map_err(err)?;
+        let timeout = Duration::try_from_secs_f64(timeout)
+            .map_err(|e| M2kError::new_err(format!("timeout: {e}")))?;
+        let mut dev = m2k_lib::M2k::connect(uri, timeout).map_err(err)?;
         dev.require_m2k().map_err(err)?;
         dev.init().map_err(err)?;
-        Ok(M2k(dev))
+        Ok(M2k(dev, timeout))
     }
 
     /// Board temperature next to the converters, in °C.
@@ -318,6 +391,42 @@ impl M2k {
             .map(Corrections::from)
             .map_err(err)
     }
+
+    /// The two blue LEDs as they are now (`only`: `"done"` or `"ready"`).
+    #[pyo3(signature = (only=None, ssh_password=None, ssh_known_hosts=None))]
+    fn led_status(
+        &mut self,
+        only: Option<&str>,
+        ssh_password: Option<String>,
+        ssh_known_hosts: Option<std::path::PathBuf>,
+    ) -> PyResult<LedStatus> {
+        let ssh = self.ssh(ssh_password, ssh_known_hosts);
+        m2k_lib::led::status(&mut self.0, led_of(only)?, &ssh)
+            .map(LedStatus::from)
+            .map_err(err)
+    }
+
+    /// Switches the LEDs off until the M2K is power cycled.
+    #[pyo3(signature = (only=None, ssh_password=None, ssh_known_hosts=None))]
+    fn led_off(
+        &mut self,
+        only: Option<&str>,
+        ssh_password: Option<String>,
+        ssh_known_hosts: Option<std::path::PathBuf>,
+    ) -> PyResult<LedStatus> {
+        self.led_set(false, only, ssh_password, ssh_known_hosts)
+    }
+
+    /// Switches the LEDs back on.
+    #[pyo3(signature = (only=None, ssh_password=None, ssh_known_hosts=None))]
+    fn led_on(
+        &mut self,
+        only: Option<&str>,
+        ssh_password: Option<String>,
+        ssh_known_hosts: Option<std::path::PathBuf>,
+    ) -> PyResult<LedStatus> {
+        self.led_set(true, only, ssh_password, ssh_known_hosts)
+    }
 }
 
 #[pymodule]
@@ -331,5 +440,6 @@ fn m2k(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PsuStatus>()?;
     m.add_class::<DmmReading>()?;
     m.add_class::<Corrections>()?;
+    m.add_class::<LedStatus>()?;
     Ok(())
 }

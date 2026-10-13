@@ -10,7 +10,7 @@ use iiod_client::Attr;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use m2k::cal::{self, Corrections};
 use m2k::conv::{Rail, Range};
-use m2k::{LogicTrigger, M2k, TriggerCondition, device, dmm, logic, psu, scope, stats, wave};
+use m2k::{LogicTrigger, M2k, TriggerCondition, device, dmm, led, logic, psu, scope, stats, wave};
 use serde_json::{Value, json};
 use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
@@ -90,6 +90,68 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<CalCmd>,
     },
+    /// The two blue LEDs: off for a dark bench, on again, or what they are now.
+    #[command(long_about = "\
+The two blue LEDs of the M2K: switch them off (a dark bench), on again, or show what they are now.
+
+  done   the steady DONE LED, through iiod like everything else.
+  ready  the blinking \"Ready\" LED (the kernel's heartbeat). Only a shell on the M2K reaches it, so this one
+         goes through the `ssh` on this PC: root@HOST with the factory password `analog`, HOST from --uri.
+
+RAM only: both LEDs are back on after a power cycle of the M2K.
+
+When ssh is missing or the login is refused, the DONE LED is still switched; the output says that the Ready LED
+was not changed and why, and `off`/`on` end with exit code 1.
+
+The password goes to ssh through this program acting as its SSH_ASKPASS helper (handed over in the environment
+of the ssh child: no file, not on a command line) and is never printed. The M2K's host key is not checked and
+nothing is written to a known_hosts file, as long as the password is the public factory one; another password is
+only sent with --ssh-known-hosts FILE, which pins the key on first use and refuses a changed one.")]
+    Led(LedArgs),
+}
+
+#[derive(Args, Debug)]
+struct LedArgs {
+    #[command(subcommand)]
+    cmd: Option<LedCmd>,
+    /// Only this LED (both without it).
+    #[arg(long, global = true, value_name = "LED")]
+    only: Option<LedArg>,
+    /// Password of root on the M2K for the Ready LED [default: the factory one, `analog`]. Better through the
+    /// environment than here: other users of this PC can see command lines.
+    #[arg(long, global = true, env = led::ENV_PASSWORD, hide_env_values = true, value_name = "PASSWORD")]
+    ssh_password: Option<led::Password>,
+    /// Pin the M2K's ssh host key in this file (created on first use) and refuse a changed one; needed for a
+    /// password other than the factory one. Never your ~/.ssh/known_hosts.
+    #[arg(long, global = true, env = "M2K_SSH_KNOWN_HOSTS", value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+    ssh_known_hosts: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+enum LedCmd {
+    /// What both LEDs are now (the default); the Ready LED only when ssh gets in.
+    Status,
+    /// Switch the LEDs off, until the M2K is power cycled.
+    Off,
+    /// Switch the LEDs back on (Ready blinks again).
+    On,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LedArg {
+    /// The steady DONE LED (through iiod).
+    Done,
+    /// The blinking Ready LED (through ssh).
+    Ready,
+}
+
+impl From<LedArg> for led::Led {
+    fn from(l: LedArg) -> led::Led {
+        match l {
+            LedArg::Done => led::Led::Done,
+            LedArg::Ready => led::Led::Ready,
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -451,6 +513,8 @@ mod style {
 }
 
 pub fn main() {
+    // ssh started us as its SSH_ASKPASS helper (`m2k led`): answer and exit, before anything else
+    led::askpass_main();
     complete::complete(Cli::command);
     let cli = Cli::parse();
     let json = cli.json;
@@ -486,6 +550,11 @@ fn run(cli: Cli) -> Result<()> {
             &mut m2k_connect(connect)?,
             cmd.unwrap_or(CalCmd::Status),
         ),
+        Cmd::Led(args) => {
+            let mut m = connect()?;
+            m.require_m2k()?;
+            led_cmd(&out, &mut m, args, cli.timeout)
+        }
     }
 }
 
@@ -1484,6 +1553,83 @@ fn cal_cmd(out: &Out, m: &mut M2k, cmd: CalCmd) -> Result<()> {
     Ok(())
 }
 
+// ---- led ----
+
+/// One line and the JSON of an LED: `ready` is `None` for the DONE LED, which has no trigger to show.
+fn led_line(name: &str, on: bool, ready: Option<&led::Ready>) -> (String, Value) {
+    let mut value = json!({ "on": on });
+    let detail = match ready {
+        Some(r) => {
+            value["trigger"] = json!(r.trigger);
+            value["brightness"] = json!(r.brightness);
+            let blinking = if r.trigger == "heartbeat" {
+                "blinking, "
+            } else {
+                ""
+            };
+            style::dim(&format!(" ({blinking}trigger {})", r.trigger))
+        }
+        None => String::new(),
+    };
+    (format!("{name}: {}{detail}", on_off(on)), value)
+}
+
+/// Text and JSON of `m2k led`: a line per LED asked for; an unreachable Ready LED says why.
+fn led_text(status: &led::Status, changing: bool) -> (String, Value) {
+    let mut text = vec![];
+    let mut value = json!({ "done": null, "ready": null, "partial": status.partial() });
+    if let Some(on) = status.done {
+        let (line, v) = led_line("done", on, None);
+        text.push(line);
+        value["done"] = v;
+    }
+    match &status.ready {
+        Some(Ok(r)) => {
+            let (line, v) = led_line("ready", r.on, Some(r));
+            text.push(line);
+            value["ready"] = v;
+        }
+        Some(Err(e)) => {
+            let what = if changing { "not changed" } else { "unknown" };
+            text.push(format!("ready: {}: {e}", style::yellow(what)));
+            value["ready"] = json!({ "on": null, "changed": false, "error": e.to_string() });
+        }
+        None => {}
+    }
+    (text.join("\n"), value)
+}
+
+fn led_cmd(out: &Out, m: &mut M2k, args: LedArgs, timeout: Duration) -> Result<()> {
+    let ssh = led::Ssh {
+        password: args.ssh_password.unwrap_or_default(),
+        askpass: std::env::current_exe().ok(),
+        known_hosts: args.ssh_known_hosts,
+        timeout,
+        program: "ssh".into(),
+    };
+    let only = args.only.map(led::Led::from);
+    let cmd = args.cmd.unwrap_or(LedCmd::Status);
+    let status = match cmd {
+        LedCmd::Status => led::status(m, only, &ssh)?,
+        LedCmd::Off => led::set(m, false, only, &ssh)?,
+        LedCmd::On => led::set(m, true, only, &ssh)?,
+    };
+    let changing = !matches!(cmd, LedCmd::Status);
+    let (mut text, value) = led_text(&status, changing);
+    if matches!(cmd, LedCmd::Off) {
+        text += &format!(
+            "\n{}",
+            style::dim("until the M2K is power cycled; `m2k led on` brings them back")
+        );
+    }
+    out.print(text, value);
+    if changing && status.partial() {
+        // the result is printed in full; the exit code says that not everything asked for was done
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1575,6 +1721,83 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn led_parses_and_keeps_the_password_out_of_debug() {
+        let cli = Cli::try_parse_from(["m2k", "led"]).unwrap();
+        let Cmd::Led(l) = cli.cmd else { panic!() };
+        assert!(l.cmd.is_none() && l.only.is_none());
+        let cli = Cli::try_parse_from([
+            "m2k",
+            "led",
+            "off",
+            "--only",
+            "ready",
+            "--ssh-password",
+            "s3cret-not-analog",
+            "--ssh-known-hosts",
+            "/tmp/kh",
+        ])
+        .unwrap();
+        assert!(!format!("{cli:?}").contains("s3cret"));
+        let Cmd::Led(l) = cli.cmd else { panic!() };
+        assert!(matches!(l.cmd, Some(LedCmd::Off)));
+        assert!(matches!(l.only, Some(LedArg::Ready)));
+        assert_eq!(
+            l.ssh_password,
+            Some(led::Password::new("s3cret-not-analog"))
+        );
+        assert!(Cli::try_parse_from(["m2k", "led", "--only", "both"]).is_err());
+        // the help names the env var, never its value
+        let help = Cli::command()
+            .find_subcommand_mut("led")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("M2K_SSH_PASSWORD"), "{help}");
+        assert!(help.contains("power cycle"), "{help}");
+    }
+
+    #[test]
+    fn led_output_names_the_led_that_was_not_changed() {
+        let ok = led::Status {
+            done: Some(false),
+            ready: Some(Ok(led::Ready {
+                on: true,
+                trigger: "heartbeat".into(),
+                brightness: 255,
+            })),
+        };
+        let (text, value) = led_text(&ok, true);
+        assert_eq!(text, "done: off\nready: on (blinking, trigger heartbeat)");
+        assert_eq!(
+            value,
+            json!({
+                "done": { "on": false },
+                "ready": { "on": true, "trigger": "heartbeat", "brightness": 255 },
+                "partial": false,
+            })
+        );
+
+        let why = led::Status {
+            done: Some(false),
+            ready: Some(Err(m2k::Error::Invalid("no ssh".into()))),
+        };
+        let (text, value) = led_text(&why, true);
+        assert_eq!(text, "done: off\nready: not changed: no ssh");
+        assert_eq!(value["partial"], true);
+        assert_eq!(value["ready"]["changed"], false);
+        assert_eq!(value["ready"]["error"], "no ssh");
+        assert!(led_text(&why, false).0.contains("ready: unknown: no ssh"));
+
+        let only_done = led::Status {
+            done: Some(true),
+            ready: None,
+        };
+        let (text, value) = led_text(&only_done, false);
+        assert_eq!(text, "done: on");
+        assert!(value["ready"].is_null());
     }
 
     fn write_temp(name: &str, content: &str) -> std::path::PathBuf {
