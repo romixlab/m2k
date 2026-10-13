@@ -59,7 +59,16 @@ m2k logic -n 1M -r 10M --trigger 3:rising --trigger-delay -1000 --vcd /tmp/cap.v
 m2k digital out pattern.csv -r 1M --open-drain 0,1 --cyclic --for 5s   # play a dioN-column CSV on its pins, 0/1 open-drain
 m2k dmm                               # board monitors: supply rails, temperatures
 m2k attr m2k-adc                      # any IIO attribute (read; add a value to write)
+m2k led off                           # both blue LEDs off (dark bench); `m2k led on` brings them back
 ```
+
+`m2k led` (`status` by default, `off`, `on`; `--only done|ready`) switches the two blue LEDs: the steady DONE
+LED through iiod, the blinking Ready LED through `ssh root@<the M2K>` with the factory password (the `ssh` of
+this PC; nothing is written to `known_hosts`). Harmless for the circuit, and RAM only: both are back on after a
+power cycle. If ssh is missing or the login is refused, the DONE LED is still switched and the line `ready: not
+changed: <why>` (JSON: `"partial": true`, `ready.error`) says so, with exit code 1; report that to the user
+instead of retrying. A changed root password: `M2K_SSH_PASSWORD` plus `--ssh-known-hosts FILE` (ask the user;
+never put a password on the command line or in your answer).
 
 `gen` holds its output only while it runs: start it in the background (or with `--for`), measure, then let it
 end. While generating, measure from a second shell:
@@ -113,7 +122,7 @@ offer the CSV path for a closer look.
 - A killed `m2k gen` (SIGKILL) leaves the output amplifier on at about 0 V: `m2k gen -c 1,2 off`. A killed
   `m2k digital out` leaves its pins driving the last sample: `m2k attr m2k-logic-analyzer -c voltageN direction in`
   per pin tri-states it again.
-- Verified on a real M2K (Rev.D, firmware 0.27): info, attr, psu (on its own monitor), dmm, voltmeter, scope
+- Verified on a real M2K (Rev.D, firmware 0.27): `led` (both LEDs, 13 Oct 2026), info, attr, psu (on its own monitor), dmm, voltmeter, scope
   and gen through a loopback, cal run/status/reset, logic with open pins, `digital out` and `logic --trigger`
   self-contained on DIO0 (push-pull and open-drain, trigger firing where predicted). Not yet verified: `cal lut`
   (no board at hand had a factory table), supplies against an external meter, VCD against sigrok-cli.

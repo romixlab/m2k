@@ -13,6 +13,7 @@ m2k gen -c 1 --for 10s sine -f 1k -a 1      # W1: 1 kHz, ±1 V; off again after 
 m2k voltmeter --range 2.5                   # DC and AC rms on 1+/1- and 2+/2-
 m2k psu set --pos 3.3 --neg -3.3; m2k psu off
 m2k logic -n 100k -r 10M -p 0-7
+m2k led off                                 # both blue LEDs off until the next power cycle (`led on`)
 m2k --json scope                            # every command: machine-readable output
 source <(COMPLETE=bash m2k)                 # shell completion (zsh, fish too)
 ```

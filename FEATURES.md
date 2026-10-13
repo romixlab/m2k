@@ -48,6 +48,28 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
 - ✅ **DEV-3 Power-up**: every M2K command first powers the scope front end and clock and sets the AD9963 output
   gain registers, as libm2k does when it opens an M2K (`M2k::init`). Without it a freshly booted M2K has its
   scope inputs powered down. Nothing is powered down at the end (libm2k does that on close); see CAL-4.
+- ✅ **DEV-4 LEDs** (P2618#13oct-1031): `m2k led off|on|status` for the two blue LEDs, `--only done|ready` for
+  one of them; RAM only, both are back on after a power cycle. The steady **DONE** LED through iiod
+  (`m2k-fabric` out:voltage4 `done_led_overwrite_powerdown`, 1 = off, what libm2k's `setLed` writes:
+  `M2k::done_led`/`set_done_led`). The blinking **Ready** LED is the kernel's `led0:green` with the `heartbeat`
+  trigger, which iiod cannot reach: `m2k::led` runs the system `ssh` (OpenSSH 8.4 or later, no new dependency)
+  as `root@HOST` (HOST from `--uri`) with fixed commands (`echo none > trigger; echo 0 > brightness`, or `echo
+  heartbeat > trigger`, then reading both back). The password (`--ssh-password` / `M2K_SSH_PASSWORD`, default
+  the factory `analog`) reaches ssh through the `m2k` binary acting as its own `SSH_ASKPASS` helper
+  (`led::askpass_main`), handed over in the environment of the ssh child only: no file, not in argv, not in
+  any output; the helper answers password prompts only. ssh runs with `-F none`, password authentication only
+  (no key or agent of the user is offered). Host key: not checked and nothing written to a `known_hosts` file
+  with the factory password (public password, every M2K at the same 192.168.2.1, fixed commands: nothing for a
+  fake host to learn); another password is only sent with `--ssh-known-hosts FILE` / `M2K_SSH_KNOWN_HOSTS`
+  (a file of the user's choice, never `~/.ssh/known_hosts`), which pins the key on first use and refuses a
+  changed one. No ssh, no login or a changed key: the DONE LED is still switched, the output names the Ready
+  LED as `not changed` with the reason (`"partial": true` in JSON) and `off`/`on` exit with 1; `status` shows
+  it as `unknown` and exits with 0. `led` does not run the power-up (DEV-3). Verified on the Rev.D, firmware
+  v0.27 (dropbear 2019.78), from a PC with OpenSSH 10.6, 13 Oct 2026: off/status/on/status per LED and both
+  (read back through the attribute and sysfs; nobody looked at the LEDs during this run, the mapping to the
+  two LEDs was checked by hand before), missing ssh, wrong password, pinned and changed host key,
+  `tests/device.rs::leds`; `tests/emu.rs::leds` with a stand-in ssh, `tests/askpass.rs` and unit tests for the
+  argument building. Not checked: OpenSSH on Windows.
 
 ## Power supplies (`PSU`)
 
@@ -172,12 +194,17 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
   rather than the CLI's shape flags — no Python equivalent of `gen::build_wave` yet. Verified:
   `tests/test_smoke.py` (offline: module shape and error mapping, no M2K or emulator) via `just test-py`; not
   yet exercised against the emulator or a real M2K.
+- 🧪 **PY-2 LEDs**: `M2k.led_status`/`led_off`/`led_on` (`only`, `ssh_password`, `ssh_known_hosts`) returning
+  `LedStatus` (`done`, `ready`, `ready_trigger`, `ready_error`), on top of DEV-4. The askpass helper is the
+  `m2k` CLI found on PATH; without it the Ready LED is reported in `ready_error` and the DONE LED still
+  switches. Verified: `tests/test_smoke.py` (the methods exist); not yet run against a real M2K.
 
 ## Agent skill (`SKILL`)
 
 - 🧪 **SKILL-1 skills/m2k/SKILL.md**: what to ask about wiring, recipes per task, reading the output, safety with
   outputs and supplies, what is verified where. Not yet used on a real debugging session.
-- 📋 **SKILL-2 Skill tree**: usage signals and skilltree entries for the `m2k` commands (P2618 task).
+- 📋 **SKILL-2 Skill tree**: usage signals and skilltree entries for the `m2k` commands, `m2k led` (DEV-4)
+  included (P2618 task).
 
 ## On-device daemon (`DAEMON`)
 

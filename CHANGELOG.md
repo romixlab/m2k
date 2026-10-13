@@ -6,6 +6,19 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+### Added
+
+- `m2k led off|on|status`: the two blue LEDs of the M2K, `--only done|ready` for one of them; RAM only, both are
+  back on after a power cycle. The steady DONE LED goes through iiod; the blinking Ready LED (the kernel's
+  heartbeat LED) through the `ssh` on the PC as root with the factory password, or `--ssh-password` /
+  `M2K_SSH_PASSWORD` together with `--ssh-known-hosts FILE` / `M2K_SSH_KNOWN_HOSTS` (pins the M2K's host key
+  in a file of your choice). When ssh is missing or the login is refused, the DONE LED is still switched and
+  the output says that the Ready LED was not changed and why (exit code 1 for `off`/`on`) (DEV-4).
+- Library: `m2k::led` (`status`, `set`, `Ssh`, `askpass_main`) and `M2k::done_led`/`set_done_led` (DEV-4).
+- Python: `M2k.led_status`/`led_off`/`led_on` and `LedStatus` (PY-2).
+- New environment variables: `M2K_SSH_PASSWORD`, `M2K_SSH_KNOWN_HOSTS`; `M2K_ASKPASS` is internal (set by
+  `m2k` for the ssh it starts) (DEV-4).
+
 ## [0.6.0] - 2026-10-10
 
 ### Changed

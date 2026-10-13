@@ -52,6 +52,10 @@ other instrument tools (tpm CLAUDE.md "Code repos": tools are a library first, g
   - `cal.rs` — self-calibration as libm2k's `M2kCalibrationImpl`, factory table, reset, and `run` (the typed
     call behind `m2k cal run`: calibrate the scope, then the outputs unless `adc_only`).
   - `stats.rs` — capture summaries (`Analog`, `Digital`): what `scope`, `voltmeter` and `logic` summarize.
+  - `led.rs` — the two blue LEDs (DEV-4): DONE through iiod, Ready through the system `ssh` (`Ssh`, the
+    argument building, `askpass_main` for the binary that serves as `SSH_ASKPASS`). The only place that starts
+    another program and handles a password: the password travels in the ssh child's environment only, never
+    in argv, a file, an error or `Debug` output; keep the unit tests that check this.
   - `scope.rs`, `gen.rs`, `logic.rs`, `psu.rs`, `dmm.rs` — the typed calls behind the CLI commands of the same
     name (CLI-5): `scope::capture`/`scope::voltmeter`, `gen::build_wave`, `logic::capture`,
     `psu::status`/`set`/`off`, `dmm::readings`. Captures come back as structs/arrays, not text.
@@ -66,13 +70,13 @@ other instrument tools (tpm CLAUDE.md "Code repos": tools are a library first, g
   plain numbers, never strings. `src/complete.rs` dynamic shell completion, its Bash adapter copied from
   wire_weaver_cli / saleae_cli / gw121_cli (keep in sync). `build.rs` `GIT_SHA` and `BUILD_TIME` for
   `--version`. `anyhow` only here. `tests/emu.rs` end to end against iio-emu; `tests/device.rs` against a
-  real M2K when asked to.
+  real M2K when asked to; `tests/askpass.rs` the binary as its own `SSH_ASKPASS` helper (DEV-4), offline.
 - `crates/m2k_py` — the `m2k` Python module (PY-1; PyO3, abi3 for Python >= 3.9, built by maturin from
   `pyproject.toml`; `publish = false` on crates.io, it ships as a wheel): the `M2k` class
   (`scope`/`voltmeter`/`logic`/`gen_start`/`gen_stop`/`psu_status`/`psu_set`/`psu_off`/`dmm`/`cal_run`/
-  `cal_status`/`cal_reset`/`temperature`), data classes for the typed calls' results
-  (`ScopeCapture`/`Analog`/`LogicCapture`/`Digital`/`PsuStatus`/`DmmReading`/`Corrections`), exceptions as
-  `M2kError` mapped from `m2k::Error`. `gen_start` takes a plain sample array (build it with numpy) rather
+  `cal_status`/`cal_reset`/`temperature`/`led_status`/`led_off`/`led_on`), data classes for the typed calls'
+  results (`ScopeCapture`/`Analog`/`LogicCapture`/`Digital`/`PsuStatus`/`DmmReading`/`Corrections`/
+  `LedStatus`), exceptions as `M2kError` mapped from `m2k::Error`. `gen_start` takes a plain sample array (build it with numpy) rather
   than the CLI's shape flags — there is no Python equivalent of `gen::build_wave` yet. `m2k.pyi` (type stubs
   and docstrings, shipped by maturin) must match `src/lib.rs`; `tests/test_smoke.py` is the offline pytest
   smoke test (no M2K or emulator: exercises the module boundary and error mapping only; `tests/device.rs`-style
@@ -111,7 +115,9 @@ scope reads back what W1/W2 play but treats the 75 MS/s output samples as 100 MS
 
 ## Hardware safety
 
-- Reading (info, attr reads, dmm, voltmeter, scope, logic) is harmless anytime.
+- Reading (info, attr reads, dmm, voltmeter, scope, logic) is harmless anytime; so is `m2k led` (the two
+  LEDs on the board, nothing on the connectors). It logs in to the M2K's shell as root over ssh with fixed
+  commands: never extend that to anything that writes outside `/sys/class/leds` without asking.
 - Outputs and supplies can damage whatever is wired to the M2K. Ask the user what is connected before driving
   them, keep levels to what they allow, and switch everything off after a test (`m2k gen -c 1,2 off`,
   `m2k psu off`, or the Python module's `gen_stop`/`psu_off`). `m2k cal run` (and the Python `cal_run`) drives

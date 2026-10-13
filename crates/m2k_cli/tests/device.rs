@@ -1,6 +1,7 @@
 //! Against a real ADALM2000, only when `M2K_TEST_URI` is set (e.g. `ip:192.168.2.1`); skipped otherwise.
 //!
-//! Without more it only reads (info, monitors, scope, logic) and drives DIO0 (`digital_self_loopback`,
+//! Without more it only reads (info, monitors, scope, logic), switches the two LEDs and back (`leds`, needs
+//! `ssh` on this PC) and drives DIO0 (`digital_self_loopback`,
 //! which needs nothing wired: `digital out` and `logic` read the same physical pin). With
 //! `M2K_TEST_LOOPBACK=1` it also drives the analog outputs and calibrates, and needs W1 wired to 1+, W2 to
 //! 2+, and 1-, 2- to GND. It switches every output and supply off again.
@@ -158,4 +159,31 @@ fn digital_self_loopback() {
     assert_eq!(v["trigger"]["sample_index"], 0, "{v}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Both blue LEDs, switched to the other state and back: the DONE LED through iiod, the Ready LED through
+/// the system `ssh` with the factory password (the M2K's ssh server must be reachable from this PC).
+#[test]
+fn leds() {
+    let Some(uri) = uri() else { return };
+    let before = json(&uri, &["led"]);
+    let (done, ready) = (&before["done"]["on"], &before["ready"]["on"]);
+    assert!(done.is_boolean() && ready.is_boolean(), "{before}");
+    let name = |on: &serde_json::Value| if on == true { "on" } else { "off" };
+    let other = |on: &serde_json::Value| if on == true { "off" } else { "on" };
+
+    let v = json(&uri, &["led", other(done), "--only", "done"]);
+    assert_eq!(v["done"]["on"] == true, done == false, "{v}");
+    assert!(v["ready"].is_null(), "{v}");
+    let v = json(&uri, &["led", other(ready), "--only", "ready"]);
+    assert_eq!(v["ready"]["on"] == true, ready == false, "{v}");
+    let trigger = if ready == false { "heartbeat" } else { "none" };
+    assert_eq!(v["ready"]["trigger"], trigger, "{v}");
+
+    json(&uri, &["led", name(done), "--only", "done"]);
+    json(&uri, &["led", name(ready), "--only", "ready"]);
+    let after = json(&uri, &["led"]);
+    assert_eq!(after["done"]["on"], *done, "{after}");
+    assert_eq!(after["ready"]["on"], *ready, "{after}");
+    assert_eq!(after["partial"], false);
 }
