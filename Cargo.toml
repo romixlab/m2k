@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/iiod_client", "crates/m2k", "crates/m2k_cli", "crates/m2k_py"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Roman Isaikin <roman@vhrd.tech>"]
 license = "MIT OR Apache-2.0"
@@ -11,8 +11,8 @@ repository = "https://github.com/romixlab/m2k"
 rust-version = "1.88"
 
 [workspace.dependencies]
-m2k = { path = "crates/m2k", version = "0.6.0" }
-iiod_client = { path = "crates/iiod_client", version = "0.6.0" }
+m2k = { path = "crates/m2k", version = "0.7.0" }
+iiod_client = { path = "crates/iiod_client", version = "0.7.0" }
 anyhow = "1"
 clap = { version = "4.6", features = ["derive", "env"] }
 clap_complete = { version = "4.6", features = ["unstable-dynamic"] }

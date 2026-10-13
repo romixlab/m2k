@@ -6,6 +6,8 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-13
+
 ### Added
 
 - `m2k led off|on|status`: the two blue LEDs of the M2K, `--only done|ready` for one of them; RAM only, both are

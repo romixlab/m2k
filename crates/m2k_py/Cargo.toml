@@ -14,5 +14,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # renamed: the extension module's `#[pymodule] fn m2k` would otherwise shadow the `m2k` crate name
-m2k_lib = { package = "m2k", path = "../m2k", version = "0.6.0" }
+m2k_lib = { package = "m2k", path = "../m2k", version = "0.7.0" }
 pyo3.workspace = true
