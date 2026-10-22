@@ -5,7 +5,7 @@ scope, signal generator, power supplies, voltmeter, logic analyzer and calibrati
 pure-Rust iiod client (no libiio, no libm2k, no C).
 
 ```sh
-cargo install --path crates/m2k_cli         # (crates.io: not published yet)
+cargo install --path crates/m2k_cli         # (in a checkout with tpm: `just install`; crates.io: not published yet)
 m2k info                                    # model, serial, firmware, calibration, outputs, supplies
 m2k cal run                                 # self-calibration, ~1.5 s; kept until power-off
 m2k scope -n 10k -r 1M --csv cap.csv        # both channels: stats per channel, all samples as CSV

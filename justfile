@@ -19,11 +19,15 @@ lint:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
 
+# Our PCs: the kept-releases stack, one copy on PATH; anywhere else: plain cargo install
 # Build and install m2k on this PC; completion: source <(COMPLETE=bash m2k)
 install:
-    cargo install --quiet --path crates/m2k_cli --locked
+    cargo build --profile deploy --locked -p m2k_cli
+    if command -v tpm >/dev/null; then tpm install target/deploy/m2k; else cargo install --locked --path crates/m2k_cli; fi
 
-# Bring this PC up to main
+# Bring this PC up to main: pull, install, check --version against main
 deploy:
-    tpm repos pull m2k
+    if command -v tpm >/dev/null; then tpm repos pull m2k; else git pull --ff-only; fi
     just install
+    m2k --version | grep -q "($(git rev-parse --short HEAD)" || { echo "m2k --version does not show $(git rev-parse --short HEAD)"; m2k --version; exit 1; }
+    m2k --version

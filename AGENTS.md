@@ -95,7 +95,7 @@ cargo test --workspace                         # unit tests; tests/emu.rs needs 
 IIO_EMU=/path/to/iio-emu cargo test -p m2k_cli --test emu
 M2K_TEST_URI=ip:192.168.2.1 cargo test -p m2k_cli --test device                      # real M2K, reads only
 M2K_TEST_URI=ip:192.168.2.1 M2K_TEST_LOOPBACK=1 cargo test -p m2k_cli --test device  # + outputs, needs the loopback
-cargo install --path crates/m2k_cli            # puts `m2k` in ~/.cargo/bin
+just install                                   # builds and puts `m2k` on PATH (with tpm: the release stack in ~/.local/bin; without: cargo install)
 just test-py                                   # crates/m2k_py's pytest smoke test, via uv; no device needed
 ```
 

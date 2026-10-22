@@ -21,3 +21,8 @@ indicatif = "0.18"
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
 serde_json = "1"
 thiserror = "2"
+
+# `just install`: a release build that rebuilds incrementally, installed through `tpm install`
+[profile.deploy]
+inherits = "release"
+incremental = true
