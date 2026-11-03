@@ -152,6 +152,8 @@ or the skill (no device serials, internal hosts, paths, ids). libm2k is LGPL-2.1
   spelled out (`1 MS/s`, `+0.500 V`). The `m2k` crate itself has no JSON or text formatting — that is CLI (and
   Python docstring) concern.
 - Every command that changes an output leaves it in a known state on error and on Ctrl+C.
+- CLI look and behaviour (help, completion, output, colour, errors and exit codes, progress, prompts, --version):
+  follow the CLI UX guide, `~/git/tpm/area/ops/cli-ux.md`; repo-specific rules here win where they are stricter.
 
 ## Tests
 
