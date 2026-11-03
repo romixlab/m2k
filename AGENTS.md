@@ -153,7 +153,11 @@ or the skill (no device serials, internal hosts, paths, ids). libm2k is LGPL-2.1
   Python docstring) concern.
 - Every command that changes an output leaves it in a known state on error and on Ctrl+C.
 - CLI look and behaviour (help, completion, output, colour, errors and exit codes, progress, prompts, --version):
-  follow the CLI UX guide, `~/git/tpm/area/ops/cli-ux.md`; repo-specific rules here win where they are stricter.
+  follow the CLI UX guide, `~/git/vhrd_cli/docs/ux-guide.md`
+  (https://github.com/vhrdtech/vhrd_cli/blob/main/docs/ux-guide.md); the rules every UI shares are vhrd_egui's
+  guide section 2, "rules for every UI"
+  (https://github.com/vhrdtech/vhrd_egui/blob/main/docs/ux-guide.md#2-rules-for-every-ui). Repo-specific rules
+  here win where they are stricter.
 
 ## Tests
 
