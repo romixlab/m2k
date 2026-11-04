@@ -6,11 +6,13 @@ every feature; IDs in parentheses refer to it.
 
 ## [Unreleased]
 
+- docs: internal references removed
+
 ## [0.7.2] - 2026-10-22
 
 ### Added
 
-- `just test --changed` runs only the workspace crates changed against main and their dependents (`tpm test changed`, nextest's `rdeps()`); plain `just test` runs everything, as `just test-all` does (tpm ops#22oct-2049).
+- `just test --changed` runs only the workspace crates changed against main and their dependents (nextest's `rdeps()`); plain `just test` runs everything, as `just test-all` does.
 
 ## [0.7.1] - 2026-10-22
 
@@ -52,7 +54,7 @@ every feature; IDs in parentheses refer to it.
 
 ### Changed
 
-- `m2k_cli` is now the thin CLI on top of `crates/m2k` (library-first split, tpm CLAUDE.md "Code repos"):
+- `m2k_cli` is now the thin CLI on top of `crates/m2k` (library-first split):
   same commands, flags, JSON output and shell completion as before, no functional change (CLI-5).
   `cargo install --path .` becomes `cargo install --path crates/m2k_cli`.
 

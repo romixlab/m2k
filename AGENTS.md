@@ -3,8 +3,7 @@
 Guidance for AI agents and contributors. Read this before changing code.
 
 The m2k repo is the Cargo workspace for the Analog Devices ADALM2000 (M2K): scope, signal generator, power
-supplies, voltmeter, logic analyzer and calibration, library first (tpm CLAUDE.md "Code repos": tools are a
-library first) — the `m2k` Rust library (`crates/m2k`), its thin CLI and agent skill on top
+supplies, voltmeter, logic analyzer and calibration, library first — the `m2k` Rust library (`crates/m2k`), its thin CLI and agent skill on top
 (`crates/m2k_cli`, binary `m2k`), and a Python module for notebooks and test benches (`crates/m2k_py`). It
 talks to the iiod daemon on the M2K over TCP (port 30431; the M2K is a USB network adapter at 192.168.2.1)
 with its own pure-Rust iiod client (`crates/iiod_client`): no libiio, no libm2k, no C. The M2K specifics
@@ -21,7 +20,7 @@ IDs per area (`IIO`, `DEV`, `PSU`, `DMM`, `SCOPE`, `GEN`, `LOGIC`, `CAL`, `CLI`,
 - **Read the relevant area before starting.** A "new" bug or idea is often already recorded.
 - **Name IDs with a short slug when talking to the user**: `SCOPE-2 trigger`, never a bare `SCOPE-2`. Commit
   messages, CHANGELOG and code `TODO`s keep the bare ID.
-- **Update it in the same commit** as the code. New ids: `tpm work claim AREA` prints the next free one. Never
+- **Update it in the same commit** as the code. New ids: take the next free number in the area. Never
   renumber or reuse IDs.
 - Status ✅ means verified on a real M2K; 🧪 means emulator or unit tests only. Keep that honest, and say in the
   item what was checked how.
@@ -37,7 +36,7 @@ IDs per area (`IIO`, `DEV`, `PSU`, `DMM`, `SCOPE`, `GEN`, `LOGIC`, `CAL`, `CLI`,
 ## Layout
 
 Cargo workspace, edition 2024, one version for all crates (`[workspace.package]`), the same layout as the
-other instrument tools (tpm CLAUDE.md "Code repos": tools are a library first, gw121_cli/saleae_rs pattern):
+other instrument tools (library first, the gw121_cli/saleae_rs pattern):
 
 - `crates/iiod_client` — the iiod client, with nothing M2K-specific: it is meant to be shared with the
   ADALM-Pluto skill (IIO-6). `client.rs` the protocol over one TCP connection, `context.rs` the XML context,
@@ -126,7 +125,7 @@ scope reads back what W1/W2 play but treats the 75 MS/s output samples as 100 MS
 
 ## Dependencies
 
-Pure Rust only (tpm "Code repos" rule): no libiio, libm2k, libxml2 or any `-sys` crate. Split by crate:
+Pure Rust only: no libiio, libm2k, libxml2 or any `-sys` crate. Split by crate:
 `iiod_client` only `roxmltree`; `m2k` only `iiod_client` and `thiserror`; `m2k_cli` adds `clap`,
 `clap_complete`, `indicatif`, `ctrlc`, `serde_json`, `anyhow`; `m2k_py` adds `pyo3` (abi3: needs a Python at
 build time for `python3-config`, not at runtime). Check new dependencies with `cargo tree` for `-sys` crates
@@ -137,7 +136,7 @@ and `cc`/`bindgen` build deps.
 Crates `m2k` (library), `m2k_cli` (binary `m2k`) and `iiod_client` on crates.io (not published yet; publish
 `iiod_client` first, then `m2k`, then `m2k_cli`), repo `github.com/romixlab/m2k_cli`, MIT or Apache-2.0.
 `m2k_py` ships as a Python wheel built by maturin (`publish = false` in its `Cargo.toml`), not to crates.io.
-`tpm land` bumps the version for all of them, the user runs `cargo publish` per crate (in that order) and
+Landing bumps the version for all of them, the user runs `cargo publish` per crate (in that order) and
 `maturin publish` (or `uv build && uv publish`) for the wheel. Public repo: nothing private in commits, docs
 or the skill (no device serials, internal hosts, paths, ids). libm2k is LGPL-2.1: port formulas and constants
 (facts), never copy its code.
@@ -153,11 +152,8 @@ or the skill (no device serials, internal hosts, paths, ids). libm2k is LGPL-2.1
   Python docstring) concern.
 - Every command that changes an output leaves it in a known state on error and on Ctrl+C.
 - CLI look and behaviour (help, completion, output, colour, errors and exit codes, progress, prompts, --version):
-  follow the CLI UX guide, `~/git/vhrd_cli/docs/ux-guide.md`
-  (https://github.com/vhrdtech/vhrd_cli/blob/main/docs/ux-guide.md); the rules every UI shares are vhrd_egui's
-  guide section 2, "rules for every UI"
-  (https://github.com/vhrdtech/vhrd_egui/blob/main/docs/ux-guide.md#2-rules-for-every-ui). Repo-specific rules
-  here win where they are stricter.
+  follow the shared CLI UX guidelines used across VHRD's instrument-CLI tools ("rules for every UI"). Repo-specific
+  rules here win where they are stricter.
 
 ## Tests
 
@@ -177,11 +173,11 @@ Conventional Commits with a scope: `feat(scope): ...`, `fix(iiod): ...`, scopes 
 `scope`, `gen`, `logic`, `cal`, `cli`, `py`, `skill`, `build`. Short imperative summary, blank line, body with
 what and why; reference feature IDs.
 
-Commit on your own initiative on a session branch (`tpm work new SLUG`), each finished step one commit with
-FEATURES.md and CHANGELOG.md updated in it. When the work is done and the user agrees, `tpm land` puts it on main.
+Commit on your own initiative on a feature branch, each finished step one commit with
+FEATURES.md and CHANGELOG.md updated in it. When the work is done and the user agrees, merge it onto main.
 
 ## Versions
 
-Landing bumps the version, not each work commit (tpm CLAUDE.md "Landing bumps the version"): session commits add
-CHANGELOG entries under `[Unreleased]` without bumping; `tpm land` makes the `release: x.y.z` commit.
+Landing bumps the version, not each work commit: commits during development add
+CHANGELOG entries under `[Unreleased]` without bumping; merging to main makes the `release: x.y.z` commit.
 `m2k --version` prints version, git SHA and build time (`build.rs`, no extra crates).

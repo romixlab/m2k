@@ -541,7 +541,7 @@ mod tests {
         ] {
             assert!(ssh_args(&ssh(), bad, Action::Status).is_err(), "{bad}");
         }
-        for good in ["192.168.2.1", "m2k.local", "omarchy-m1"] {
+        for good in ["192.168.2.1", "m2k.local", "my-m2k-host"] {
             assert!(ssh_args(&ssh(), good, Action::Status).is_ok(), "{good}");
         }
     }

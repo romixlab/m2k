@@ -8,7 +8,8 @@ This file is the single source of truth for what m2k does, what is broken and wh
 - **Status**: ✅ done (verified on a real M2K) · 🧪 done, verified on iio-emu only or not with a real signal ·
   🚧 partial (the note says what is missing) · 🐛 known bug · 📋 planned · 💡 idea · ⛔ blocked (on what) ·
   🔍 needs a check.
-- **IDs** (`SCOPE-3`) are stable: never renumber or reuse one. New ids come from `tpm work claim AREA`. Use the ID
+- **IDs** (`SCOPE-3`) are stable: never renumber or reuse one. New ids come from taking the next free number in the
+  area. Use the ID
   in commit messages, CHANGELOG entries and code `TODO`s (`// TODO(SCOPE-3): ...`); name it with a short slug
   when talking to people (`SCOPE-3 vertical-offset`). Areas: `IIO`, `DEV`, `PSU`, `DMM`, `SCOPE`, `GEN`,
   `LOGIC`, `CAL`, `CLI`, `PY`, `SKILL`, `DAEMON`.
@@ -34,7 +35,7 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
   per device).
 - 📋 **IIO-5 Other transports**: USB without the network (iiod's USB function interface), serial, `ZPRINT`
   (zstd context), DNS-SD discovery of `_iio._tcp`.
-- 📋 **IIO-6 Reuse for the ADALM-Pluto skill** (P2618#7oct-0032): the crate has no M2K specifics; publish it or
+- 📋 **IIO-6 Reuse for the ADALM-Pluto skill**: the crate has no M2K specifics; publish it or
   share it as a path/git dependency, then add the Pluto's buffers (complex 16-bit I/Q, `cf-ad9361-lpc`).
 - 💡 **IIO-7 Triggers**: `GETTRIG`/`SETTRIG` are not wrapped (the M2K needs none).
 
@@ -48,7 +49,7 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
 - ✅ **DEV-3 Power-up**: every M2K command first powers the scope front end and clock and sets the AD9963 output
   gain registers, as libm2k does when it opens an M2K (`M2k::init`). Without it a freshly booted M2K has its
   scope inputs powered down. Nothing is powered down at the end (libm2k does that on close); see CAL-4.
-- ✅ **DEV-4 LEDs** (P2618#13oct-1031): `m2k led off|on|status` for the two blue LEDs, `--only done|ready` for
+- ✅ **DEV-4 LEDs**: `m2k led off|on|status` for the two blue LEDs, `--only done|ready` for
   one of them; RAM only, both are back on after a power cycle. The steady **DONE** LED through iiod
   (`m2k-fabric` out:voltage4 `done_led_overwrite_powerdown`, 1 = off, what libm2k's `setLed` writes:
   `M2k::done_led`/`set_done_led`). The blinking **Ready** LED is the kernel's `led0:green` with the `heartbeat`
@@ -136,7 +137,7 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
 - 💡 **LOGIC-4 Protocol decode**: UART/SPI/I2C summaries like saleae_cli's, from a capture.
 - 🧪 **LOGIC-5 VCD export**: `logic --vcd FILE.vcd` alongside `--csv`: one wire per reported pin, `dioN` names,
   picosecond timescale, only the samples where a reported pin changed (`$dumpvars` for the initial state).
-  For sigrok and other waveform viewers to import captures (cross-check plan P2623). Not yet confirmed against
+  For sigrok and other waveform viewers to import captures. Not yet confirmed against
   `sigrok-cli` (not installed on this machine yet).
 - 🐛 **LOGIC-6 emu test vs. current iio-emu HEAD**: `tests/emu.rs::digital_out_and_logic_trigger` expects the VCD
   timescale `1 ps` for `logic -n 1000 -p 0-3` (no `-r`, so the default `1M`); against a freshly built iio-emu
@@ -175,7 +176,7 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
 - ✅ **CLI-4 Colour and progress**: colour on a terminal without `NO_COLOR`; progress bars for captures over 1 s or
   500k samples, a spinner with the current step for `cal run`; nothing of either with `--json` or when not a
   terminal.
-- 🧪 **CLI-5 Library-first split** (P2618#10oct-1107c): `crates/m2k` is the typed API (device, conversions,
+- 🧪 **CLI-5 Library-first split**: `crates/m2k` is the typed API (device, conversions,
   calibration, capture summaries, and the typed calls `scope`/`gen`/`logic`/`psu`/`dmm` behind each CLI
   command) with no `anyhow`/`serde_json`/`clap` dependency and its own `m2k::Error` (thiserror); `crates/m2k_cli`
   is the same `m2k` binary as before (unchanged commands, flags, JSON output, shell completion) now calling
@@ -187,7 +188,7 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
 
 ## Python module (`PY`)
 
-- 🧪 **PY-1 m2k_py** (P2618#10oct-1107c): `crates/m2k_py`, a PyO3 module (abi3, Python >= 3.9) wrapping
+- 🧪 **PY-1 m2k_py**: `crates/m2k_py`, a PyO3 module (abi3, Python >= 3.9) wrapping
   `crates/m2k`'s typed API: `M2k` class with `scope`, `voltmeter`, `logic`, `gen_start`/`gen_stop`,
   `psu_status`/`psu_set`/`psu_off`, `dmm`, `cal_run`/`cal_status`/`cal_reset`, `temperature`; data classes for
   each typed call's result; errors as `M2kError`. `gen_start` takes a plain sample array (build it with numpy)
@@ -204,12 +205,12 @@ to 1+, W2 to 2+, 1-/2- to GND, nothing external on the digital pins or supplies 
 - 🧪 **SKILL-1 skills/m2k/SKILL.md**: what to ask about wiring, recipes per task, reading the output, safety with
   outputs and supplies, what is verified where. Not yet used on a real debugging session.
 - 📋 **SKILL-2 Skill tree**: usage signals and skilltree entries for the `m2k` commands, `m2k led` (DEV-4)
-  included (P2618 task).
+  included.
 
 ## On-device daemon (`DAEMON`)
 
 - 💡 **DAEMON-1 Rust daemon on the M2K** (Zynq-7010, Buildroot, ADI bitstream kept): on-device triggers and
-  measurements, outputs that outlive the client; custom HDL only with a concrete need (task P2618#9oct-1207).
+  measurements, outputs that outlive the client; custom HDL only with a concrete need.
 
 ## Dropped and superseded
 
