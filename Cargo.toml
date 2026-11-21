@@ -26,3 +26,6 @@ thiserror = "2"
 [profile.deploy]
 inherits = "release"
 incremental = true
+
+[profile.dev]
+debug = false
